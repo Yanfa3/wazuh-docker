@@ -1,9 +1,19 @@
 # Wazuh App Copyright (C) 2017, Wazuh Inc. (License GPLv2)
 services:
   wazuh.manager:
-    image: wazuh/wazuh-manager:4.14.7
+    image: wazuh/wazuh-manager:5.1.0
     hostname: wazuh.manager
+    container_name: single-node-wazuh.manager
     restart: always
+    depends_on:
+      wazuh.indexer:
+        condition: service_healthy
+    healthcheck:
+      test: [ "CMD", "/var/wazuh-manager/bin/wazuh-manager-control", "status" ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
     ulimits:
       memlock:
         soft: -1
@@ -14,31 +24,40 @@ services:
     ports:
       - "5.9.50.120:1514:1514"
       - "5.9.50.120:1515:1515"
+      - "1517:1517"
+      - "514:514/udp"
+      - "55000:55000"
     environment:
-      - INDEXER_URL="https://wazuh.indexer:9200"
+      - WAZUH_INDEXER_HOSTS=wazuh.indexer:9200
+      - WAZUH_NODE_NAME=manager
+      - WAZUH_CLUSTER_NODES=wazuh.manager
+      - WAZUH_CLUSTER_BIND_ADDR=wazuh.manager
       - INDEXER_USERNAME=${INDEXER_USERNAME}
       - INDEXER_PASSWORD=${INDEXER_PASSWORD}
-      - FILEBEAT_SSL_VERIFICATION_MODE=full
-      - SSL_CERTIFICATE_AUTHORITIES=/etc/ssl/root-ca.pem
-      - SSL_CERTIFICATE=/etc/ssl/filebeat.pem
-      - SSL_KEY=/etc/ssl/filebeat.key
       - API_USERNAME=${API_USERNAME}
       - API_PASSWORD=${API_PASSWORD}
     volumes:
-      - wazuh_api_configuration:/var/ossec/api/configuration
-      - wazuh_etc:/var/ossec/etc
-      - wazuh_logs:/var/ossec/logs
-      - wazuh_queue:/var/ossec/queue
-      - wazuh_var_multigroups:/var/ossec/var/multigroups
-      - wazuh_integrations:/var/ossec/integrations
-      - wazuh_active_response:/var/ossec/active-response/bin
-      - wazuh_agentless:/var/ossec/agentless
-      - wazuh_wodles:/var/ossec/wodles
-      - filebeat_etc:/etc/filebeat
-      - filebeat_var:/var/lib/filebeat
-      - ./config/wazuh_indexer_ssl_certs/root-ca-manager.pem:/etc/ssl/root-ca.pem
-      - ./config/wazuh_indexer_ssl_certs/wazuh.manager.pem:/etc/ssl/filebeat.pem
-      - ./config/wazuh_indexer_ssl_certs/wazuh.manager-key.pem:/etc/ssl/filebeat.key
+      - wazuh_api_configuration:/var/wazuh-manager/api/configuration
+      - wazuh_etc:/var/wazuh-manager/etc
+      - wazuh_logs:/var/wazuh-manager/logs
+      - wazuh_queue:/var/wazuh-manager/queue
+      - wazuh_var_multigroups:/var/wazuh-manager/var/multigroups
+      - wazuh_integrations:/var/wazuh-manager/integrations
+      - wazuh_active_response:/var/wazuh-manager/active-response/bin
+      - wazuh_agentless:/var/wazuh-manager/agentless
+      - wazuh_wodles:/var/wazuh-manager/wodles
+      - ./config/root-ca/certs/root-ca.pem:/var/wazuh-manager/etc/certs/root-ca.pem
+      - ./config/wazuh_manager/certs/wazuh.manager.pem:/var/wazuh-manager/etc/certs/indexer-connector.pem
+      - ./config/wazuh_manager/certs/wazuh.manager-key.pem:/var/wazuh-manager/etc/certs/indexer-connector-key.pem
+      # The agent-facing HTTPS listener on 1517, and authd on 1515, present this
+      # pair. Mounting it means the deployment's own root CA signs the manager
+      # identity agents verify, instead of the self-signed pair the container
+      # generates for itself at first boot: agents then trust one CA that lives
+      # on the host, survives recreating this container, and can be handed to an
+      # agent anywhere. The manager keeps whatever pair it finds at these paths,
+      # so nothing is generated over them.
+      - ./config/wazuh_manager/certs/wazuh.manager.pem:/var/wazuh-manager/etc/certs/remoted.pem
+      - ./config/wazuh_manager/certs/wazuh.manager-key.pem:/var/wazuh-manager/etc/certs/remoted-key.pem
       - /opt/wazuh-secrets/wazuh-manager/ossec.conf:/wazuh-config-mount/etc/ossec.conf:ro
       - /opt/wazuh-secrets/aws/wazuh/config:/root/.aws/config:ro
       # AWS Roles Anywhere - Wazuh CloudTrail
@@ -47,11 +66,19 @@ services:
       - /opt/wazuh-secrets/aws/wazuh/wazuh-client.key:/opt/aws/wazuh/wazuh-client.key:ro
 
   wazuh.indexer:
-    image: wazuh/wazuh-indexer:4.14.7
+    image: wazuh/wazuh-indexer:5.1.0
     hostname: wazuh.indexer
+    container_name: single-node-wazuh.indexer
     restart: always
     environment:
-      - "OPENSEARCH_JAVA_OPTS=-Xms1g -Xmx1g"
+      - OPENSEARCH_JAVA_OPTS=-Xms1g -Xmx1g
+      - bootstrap.memory_lock=true
+      - network.host=0.0.0.0
+      - node.name=wazuh.indexer
+      - cluster.initial_cluster_manager_nodes=wazuh.indexer
+      - node.max_local_storage_nodes=1
+      - plugins.security.allow_default_init_securityindex=true
+      - NODES_DN=CN=wazuh.indexer,OU=Wazuh,O=Wazuh,L=California,C=US
     ulimits:
       memlock:
         soft: -1
@@ -59,43 +86,92 @@ services:
       nofile:
         soft: 65536
         hard: 65536
+    healthcheck:
+      test: [ "CMD-SHELL", "curl -fks https://localhost:9200/_plugins/_security/health | grep -q '\"status\":\"UP\"'" ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
     volumes:
       - wazuh-indexer-data:/var/lib/wazuh-indexer
-      - ./config/wazuh_indexer_ssl_certs/root-ca.pem:/usr/share/wazuh-indexer/config/certs/root-ca.pem
-      - ./config/wazuh_indexer_ssl_certs/wazuh.indexer-key.pem:/usr/share/wazuh-indexer/config/certs/wazuh.indexer.key
-      - ./config/wazuh_indexer_ssl_certs/wazuh.indexer.pem:/usr/share/wazuh-indexer/config/certs/wazuh.indexer.pem
-      - ./config/wazuh_indexer_ssl_certs/admin.pem:/usr/share/wazuh-indexer/config/certs/admin.pem
-      - ./config/wazuh_indexer_ssl_certs/admin-key.pem:/usr/share/wazuh-indexer/config/certs/admin-key.pem
+      - ./config/root-ca/certs/root-ca.pem:/usr/share/wazuh-indexer/config/certs/root-ca.pem
+      - ./config/wazuh_indexer/certs/wazuh.indexer-key.pem:/usr/share/wazuh-indexer/config/certs/indexer-key.pem
+      - ./config/wazuh_indexer/certs/wazuh.indexer.pem:/usr/share/wazuh-indexer/config/certs/indexer.pem
+      - ./config/wazuh_indexer/certs/admin.pem:/usr/share/wazuh-indexer/config/certs/admin.pem
+      - ./config/wazuh_indexer/certs/admin-key.pem:/usr/share/wazuh-indexer/config/certs/admin-key.pem
       - ./config/wazuh_indexer/wazuh.indexer.yml:/usr/share/wazuh-indexer/config/opensearch.yml
       - /opt/wazuh-secrets/wazuh-indexer/internal_users.yml:/usr/share/wazuh-indexer/config/opensearch-security/internal_users.yml
 
   wazuh.dashboard:
-    image: wazuh/wazuh-dashboard:4.14.7
+    image: wazuh/wazuh-dashboard:5.1.0
     hostname: wazuh.dashboard
+    container_name: single-node-wazuh.dashboard
     restart: always
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "-k", "-s", "-o", "/dev/null", "https://localhost:5601/app/login" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
     ports:
       - "127.0.0.1:8443:5601"
     environment:
-      - INDEXER_USERNAME=${INDEXER_USERNAME}
-      - INDEXER_PASSWORD=${INDEXER_PASSWORD}
+      - SERVER_PORT=5601
+      - SERVER_HOST=0.0.0.0
+      - OPENSEARCH_HOSTS=https://wazuh.indexer:9200
       - WAZUH_API_URL=https://wazuh.manager
       - DASHBOARD_USERNAME=${DASHBOARD_USERNAME}
       - DASHBOARD_PASSWORD=${DASHBOARD_PASSWORD}
       - API_USERNAME=${API_USERNAME}
       - API_PASSWORD=${API_PASSWORD}
+      - INDEXER_USERNAME=${INDEXER_USERNAME}
+      - INDEXER_PASSWORD=${INDEXER_PASSWORD}
+      - SERVER_SSL_CERTIFICATE=/usr/share/wazuh-dashboard/config/certs/dashboard.pem
+      - SERVER_SSL_KEY=/usr/share/wazuh-dashboard/config/certs/dashboard-key.pem
+      - OPENSEARCH_SSL_CERTIFICATE_AUTHORITIES=/usr/share/wazuh-dashboard/config/certs/root-ca.pem
     volumes:
-      - ./config/wazuh_indexer_ssl_certs/wazuh.dashboard.pem:/usr/share/wazuh-dashboard/certs/wazuh-dashboard.pem
-      - ./config/wazuh_indexer_ssl_certs/wazuh.dashboard-key.pem:/usr/share/wazuh-dashboard/certs/wazuh-dashboard-key.pem
-      - ./config/wazuh_indexer_ssl_certs/root-ca.pem:/usr/share/wazuh-dashboard/certs/root-ca.pem
-      - ./config/wazuh_dashboard/opensearch_dashboards.yml:/usr/share/wazuh-dashboard/config/opensearch_dashboards.yml
-      - ./config/wazuh_dashboard/wazuh.yml:/usr/share/wazuh-dashboard/data/wazuh/config/wazuh.yml
-      - wazuh-dashboard-config:/usr/share/wazuh-dashboard/data/wazuh/config
+      - ./config/wazuh_dashboard/certs/wazuh.dashboard.pem:/usr/share/wazuh-dashboard/config/certs/dashboard.pem
+      - ./config/wazuh_dashboard/certs/wazuh.dashboard-key.pem:/usr/share/wazuh-dashboard/config/certs/dashboard-key.pem
+      - ./config/root-ca/certs/root-ca.pem:/usr/share/wazuh-dashboard/config/certs/root-ca.pem
+      - wazuh-dashboard-config:/usr/share/wazuh-dashboard/config
       - wazuh-dashboard-custom:/usr/share/wazuh-dashboard/plugins/wazuh/public/assets/custom
     depends_on:
-      - wazuh.indexer
-    links:
-      - wazuh.indexer:wazuh.indexer
-      - wazuh.manager:wazuh.manager
+      wazuh.indexer:
+        condition: service_healthy
+      wazuh.manager:
+        condition: service_healthy
+
+  wazuh.agent:
+    image: wazuh/wazuh-agent:5.0.0
+    hostname: wazuh.agent
+    container_name: single-node-wazuh.agent
+    restart: always
+    # Not part of the default deployment: start it with
+    # `docker compose --profile agent up`. It is an agent on the same host as the
+    # manager, useful to exercise a deployment end to end; a real fleet runs
+    # elsewhere and points at the published 1517.
+    profiles:
+      - agent
+    depends_on:
+      wazuh.manager:
+        condition: service_healthy
+    environment:
+      - WAZUH_MANAGER_ENDPOINT=wazuh.manager:1517/wazuh-manager/
+      # The CA that signs the manager's HTTPS certificate. Without it the agent
+      # verifies the manager against the operating system trust store, which no
+      # deployment-issued certificate is in, and the connection is refused.
+      - WAZUH_MANAGER_CA=/etc/ssl/wazuh/root-ca.pem
+      # authd generates a random enrollment password at the manager's first boot.
+      # Read it with:
+      #   docker compose exec wazuh.manager cat /var/wazuh-manager/etc/authd.pass
+      #- WAZUH_REGISTRATION_PASSWORD=<authd.pass password>
+      #- WAZUH_AGENT_NAME=<agent name>
+      # The agent keeps its enrollment key in the container's own filesystem, so
+      # recreating the container enrolls again under the same name and the
+      # manager rejects it as a duplicate. Remove the agent from the manager
+      # first, or give the new container a name of its own above.
+    volumes:
+      - ./config/root-ca/certs/root-ca.pem:/etc/ssl/wazuh/root-ca.pem:ro
 
 volumes:
   wazuh_api_configuration:
@@ -103,12 +179,10 @@ volumes:
   wazuh_logs:
   wazuh_queue:
   wazuh_var_multigroups:
+  wazuh-indexer-data:
+  wazuh-dashboard-config:
+  wazuh-dashboard-custom:
   wazuh_integrations:
   wazuh_active_response:
   wazuh_agentless:
   wazuh_wodles:
-  filebeat_etc:
-  filebeat_var:
-  wazuh-indexer-data:
-  wazuh-dashboard-config:
-  wazuh-dashboard-custom:

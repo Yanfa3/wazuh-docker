@@ -1,6 +1,6 @@
 # Reference Manual - Requirements
 
-Before deploying Wazuh-Docker (version 4.14.7), it's essential to ensure your environment meets the necessary hardware and software requirements. Meeting these prerequisites will help ensure a stable and performant Wazuh deployment.
+Before deploying Wazuh-Docker (version 5.1.0), it's essential to ensure your environment meets the necessary hardware and software requirements. Meeting these prerequisites will help ensure a stable and performant Wazuh deployment.
 
 ## Host System Requirements
 
@@ -24,17 +24,17 @@ These are general recommendations. Actual needs may vary based on the number of 
 * **Network**:
     * A stable network connection with sufficient bandwidth, especially if agents are reporting from remote locations.
 
-### Software:
+### Software Prerequisites:
 
-* **Operating System**:
-    * A 64-bit Linux distribution is preferred (e.g., Ubuntu, CentOS, RHEL, Debian).
+#### Linux:
+
 * **Docker Engine**:
     * Version `20.10.0` or newer.
     * Install Docker by following the official instructions: [Install Docker Engine](https://docs.docker.com/engine/install/).
 * **Git Client**:
     * Required for cloning the `wazuh-docker` repository.
 * **Web Browser**:
-    * A modern web browser (e.g., Chrome, Firefox, Edge, Safari) for accessing the Wazuh Dashboard.
+    * A modern web browser (e.g., Chrome, Firefox, Edge, Safari) for accessing the Wazuh dashboard.
 * **`vm.max_map_count` (Linux Hosts for Wazuh Indexer/OpenSearch)**:
     * The Wazuh Indexer (OpenSearch) requires a higher `vm.max_map_count` setting than the default on most Linux systems.
     * Set it permanently:
@@ -48,22 +48,65 @@ These are general recommendations. Actual needs may vary based on the number of 
             ```
     * This is crucial for the stability of the Wazuh Indexer.
 
+#### Windows:
+
+* **Docker Desktop**
+    * Install Docker Desktop by following the official instructions: [Install Docker Desktop](https://docs.docker.com/desktop/setup/install/windows-install/).
+* **WSL Linux distribution**
+    * Install Ubuntu or other compatible Linux distribution (bash in Alpine is not compatible with wazuh-certs-tool-5.1.0-1.sh): [Install Ubuntu on WSL](https://documentation.ubuntu.com/wsl/stable/howto/install-ubuntu-wsl2/)
+* **Git Client**:
+    * Required for cloning the `wazuh-docker` repository.
+* **Web Browser**:
+    * A modern web browser (e.g., Chrome, Firefox, Edge, Safari) for accessing the Wazuh dashboard.
+
+#### macOS:
+
+* **Docker Desktop**
+    * Install Docker Desktop by following the official instructions: [Install Docker Desktop](https://docs.docker.com/desktop/setup/install/mac-install/).
+* **Bash Shell**
+* **GNU versions of apps**:
+    * [Install GNU sed](https://formulae.brew.sh/formula/gnu-sed).
+    * [Install GNU awk](https://formulae.brew.sh/formula/gawk).
+    * [Install GNU grep](https://formulae.brew.sh/formula/grep).
+* **OpenSSL**:
+    * [Install OpenSSL](https://formulae.brew.sh/formula/openssl@3).
+* **Git Client**:
+    * Required for cloning the `wazuh-docker` repository.
+* **Web Browser**:
+    * A modern web browser (e.g., Chrome, Firefox, Edge, Safari) for accessing the Wazuh dashboard.
+
 ## Network Ports
 
 Ensure that the necessary network ports are open and available on the Docker host and any firewalls:
 
 * **Wazuh Manager**:
-    * `1514/UDP`: For agent communication (syslog).
-    * `1514/TCP`: For agent communication (if using TCP).
-    * `1515/TCP`: For agent enrollment.
+    * `1517/TCP`: For agent communication and enrollment. Wazuh 5.x agents use a
+      single HTTPS channel for both, so this is the only port they need.
+    * `1514/TCP`: For agent communication with Wazuh 4.x agents (legacy
+      `remoted`). Kept for backward compatibility, not used by 5.x agents.
+    * `1515/TCP`: For agent enrollment with Wazuh 4.x agents (`wazuh-authd`).
+      Kept for backward compatibility, not used by 5.x agents.
+    * `514/UDP`: For syslog event collection.
     * `55000/TCP`: For Wazuh API (default).
+    * `1516/TCP`: For cluster communication between manager nodes. Only needed
+      between the manager containers, not on the Docker host.
 * **Wazuh Indexer**:
-    * `9200/TCP`: For HTTP REST API.
-    * `9300/TCP`: For inter-node communication (if clustered).
+    * `9200/TCP`: For HTTP REST API. **Not published on the host.** The manager
+      and the dashboard reach it over the Compose network, and the account that
+      answers on it administers the datastore. If you need it for development,
+      add the mapping bound to the loopback address (`127.0.0.1:9200:9200`).
+    * `9300/TCP`: For inter-node communication (if clustered). Only needed
+      between the indexer containers, not on the Docker host.
 * **Wazuh Dashboard**:
     * `5601/TCP` (or `443/TCP` if HTTPS is configured via a reverse proxy): For web access.
 
 Port mappings in `docker-compose.yml` will expose these container ports on the host. Adjust host ports if defaults cause conflicts.
+
+In the `single-node` deployment the manager publishes these ports directly. In
+the `multi-node` deployment the agent ports are published by the `nginx`
+service, which balances `1517` (and the legacy `1514`) across the master and
+worker nodes; enrollment travels over `1517` together with the agent traffic,
+so it is balanced the same way.
 
 ## Important Considerations
 

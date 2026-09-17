@@ -9,7 +9,7 @@ Follow these steps to deploy the Wazuh agent using Docker.
     cd wazuh-agent
     ```
 
-2.  Edit the `docker-compose.yml` file. You need to update the `WAZUH_MANAGER_SERVER` environment variable with the IP address or hostname of your Wazuh manager.
+2.  Edit the `docker-compose.yml` file. You need to update the `WAZUH_MANAGER_ENDPOINT` environment variable with the IP address or hostname of your Wazuh manager.
 
     Locate the `environment` section for the agent service and update it as follows:
     ```yaml
@@ -18,10 +18,120 @@ Follow these steps to deploy the Wazuh agent using Docker.
     #   wazuh-agent:
     #     ...
     environment:
-      - WAZUH_MANAGER_SERVER=<YOUR_WAZUH_MANAGER_IP_OR_HOSTNAME>
+      - WAZUH_MANAGER_ENDPOINT=<YOUR_WAZUH_MANAGER_IP_OR_HOSTNAME>:1517/wazuh-manager/
+      - WAZUH_AGENT_NAME=<YOUR_AGENT_NAME>
+      - WAZUH_REGISTRATION_PASSWORD=<authd.pass-PASSWORD>
     #     ...
     ```
-    **Note:** Replace `<YOUR_WAZUH_MANAGER_IP_OR_HOSTNAME>` with the actual IP address or hostname of your Wazuh manager.
+    **Note:** Replaces `<YOUR_WAZUH_MANAGER_IP_OR_HOSTNAME>` with the actual IP address or hostname of your Wazuh manager.
+    **Note:** Replaces `<authd.pass-PASSWORD>` with the password configured in the `/var/wazuh-manager/etc/authd.pass` file of the Wazuh manager server where you will connect.
+
+    The container writes `/var/ossec/etc/ossec.conf` with the following
+    variables the first time it starts. `/var/ossec/etc` is persisted in the
+    `wazuh_agent_etc` volume (see the note below), so on later starts the
+    agent's identity and configuration are kept as they are instead of being
+    rewritten:
+
+    | Variable | Default | Configuration set |
+    | - | - | - |
+    | `WAZUH_MANAGER_ENDPOINT` | None | `<agent><manager><endpoint>`, whole |
+    | `WAZUH_MANAGER_SERVER` | None | Host of `<agent><manager><endpoint>` |
+    | `WAZUH_MANAGER_PORT` | `1517` | Port of `<agent><manager><endpoint>` |
+    | `WAZUH_AGENT_NAME` | `wazuh-agent-<container hostname>` | `<agent><enrollment><agent_name>` |
+    | `WAZUH_REGISTRATION_PASSWORD` | None | `/var/ossec/etc/authd.pass` |
+    | `WAZUH_MANAGER_CA` | None | `<agent><ssl><certificate_authorities>` |
+    | `WAZUH_AGENT_SSL_VERIFICATION` | Inferred | `<agent><ssl><verification_mode>` |
+    | `WAZUH_AGENT_SSL_CERT` / `WAZUH_AGENT_SSL_KEY` | None | `<agent><ssl><certificate>` / `<key>` |
+
+    **Note:** The agent addresses the manager through a single endpoint,
+    `host[:port][/prefix]`. A component left out is filled in with its default,
+    port `1517` and prefix `/wazuh-manager/`, which is what the dockerized
+    manager serves, so `<YOUR_WAZUH_MANAGER_IP_OR_HOSTNAME>` on its own is
+    written out as the full form above. The endpoint always lands in
+    `ossec.conf` complete, as `host:port/prefix`.
+
+    **Note:** The port must match the `<remote><https><port>` of your Wazuh
+    manager, `1517` in the default configuration. Since 5.0.0 the agent enrolls
+    over that same HTTPS connection, so this port covers both agent
+    communication and registration: there is no separate enrollment port.
+
+    **Note:** The connection may be given either way. `WAZUH_MANAGER_ENDPOINT`
+    carries it as one value, and `WAZUH_MANAGER_SERVER` with
+    `WAZUH_MANAGER_PORT` split it into an address and a port:
+
+    ```yaml
+    environment:
+      - WAZUH_MANAGER_SERVER=<YOUR_WAZUH_MANAGER_IP_OR_HOSTNAME>
+      - WAZUH_MANAGER_PORT=1517
+      - WAZUH_REGISTRATION_PASSWORD=<authd.pass-PASSWORD>
+    ```
+
+    `WAZUH_MANAGER_ENDPOINT` wins when both are set, and the other two are then
+    not read at all. One of the two forms is required: with neither, the
+    container logs the reason and exits rather than starting an agent that
+    could only retry against an unconfigured manager.
+
+    Either way the single `<endpoint>` is the only configuration written, and it
+    is written in full. The `<address>` and `<port>` tags it replaced are never
+    touched, so a package that still ships them predates the change and the
+    container says so on start.
+
+    **Note:** For an IPv6 manager, bracket the literal whenever a port follows
+    it, and percent-encode the `%` of a zone id as `%25`:
+
+    ```yaml
+    environment:
+      - WAZUH_MANAGER_ENDPOINT=[fe80::1%25eth0]:1517/wazuh-manager/
+    ```
+
+    **Note:** `WAZUH_REGISTRATION_SERVER` and `WAZUH_REGISTRATION_PORT` are not
+    supported and configure nothing, because enrollment reuses the agent
+    connection instead of reaching `authd` separately. The container logs a
+    warning when either is set.
+
+    **Note:** The agent verifies the manager's TLS certificate. Left unconfigured
+    it verifies against the operating system trust store, which covers a manager
+    whose certificate chains to a publicly trusted CA and nothing else: a manager
+    presenting a certificate of its own, which is what a Wazuh manager does by
+    default, is refused. Give the agent the CA that signs it:
+
+    ```yaml
+    environment:
+      - WAZUH_MANAGER_ENDPOINT=<YOUR_WAZUH_MANAGER_IP_OR_HOSTNAME>:1517/wazuh-manager/
+      - WAZUH_REGISTRATION_PASSWORD=<authd.pass-PASSWORD>
+      - WAZUH_MANAGER_CA=/etc/ssl/wazuh/root-ca.pem
+    volumes:
+      - ./root-ca.pem:/etc/ssl/wazuh/root-ca.pem:ro
+    ```
+
+    **Note:** Replaces `./root-ca.pem` with the CA that signs the certificate on
+    your manager's `1517` listener. For a manager deployed from this repository
+    it is `single-node/config/root-ca/certs/root-ca.pem`, or the `multi-node`
+    one. For any other manager, ask whoever runs it. The CA may also be dropped
+    at `/var/ossec/etc/certs/root-ca.pem`, in which case the variable is not
+    needed.
+
+    **Note:** A CA on its own means the certificate chain is verified but the
+    hostname is not, which is what lets one agent reach a manager through a name
+    the certificate does not carry, such as a load balancer.
+    `WAZUH_AGENT_SSL_VERIFICATION` overrides that with `full`, `certificate`,
+    `system` or `none`. `WAZUH_AGENT_SSL_CERT` and `WAZUH_AGENT_SSL_KEY` add a
+    client certificate, which only a manager configured with
+    `<remote><https><ca>` asks for. The full table is in
+    [Environment Variables](../../configuration/environment-variables.md#wazuh-agent).
+
+    **Note:** To use a configuration of your own instead of these variables,
+    mount your `ossec.conf` at `/wazuh-config-mount/etc/ossec.conf`. It is
+    copied over the packaged one before the substitutions run, so a mounted
+    file is used as it is.
+
+    **Note:** The compose file mounts `/var/ossec/etc` on the `wazuh_agent_etc`
+    volume, so `client.keys` and the resolved configuration survive the
+    container being recreated (an image upgrade, a host reboot, `docker
+    compose down && up`). Without it, every recreation would enroll as a new
+    agent, since the container gets a new hostname-derived
+    `WAZUH_AGENT_NAME` and loses its previous `client.keys` each time, leaving
+    the old registration on the manager with nothing to remove it.
 
 3.  Start the environment using `docker compose`:
 
