@@ -1,0 +1,72 @@
+name: Yanfaa Wazuh Deployment - CI/CD Pipeline
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+permissions:
+  id-token: write # Required for requesting the OIDC JWT Token
+  contents: read  # Required for actions/checkout
+
+jobs:
+  deploy-production-ssm:
+    name: Deploy to Production via SSM
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: production
+    concurrency:
+      group: production
+      cancel-in-progress: false
+    steps:
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@ff717079ee2060e4bcee96c4779b553acc87447c # v4
+        with:
+          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
+          aws-region: eu-west-1
+          
+      - name: Execute Deployment
+        run: |
+          COMMAND_ID=$(aws ssm send-command \
+            --instance-ids "${{ secrets.PRODUCTION_INSTANCE_ID }}" \
+            --document-name "AWS-RunShellScript" \
+            --parameters '{"commands":["su - yanfaa -c \"cd /home/yanfaa/wazuh-docker && git fetch origin main && git reset --hard origin/main && if [ -f deploy.sh ]; then chmod +x deploy.sh && ./deploy.sh main --non-interactive; else cd single-node && docker compose pull && docker compose up -d; fi\""]}' \
+            --comment "Deploying main branch to Wazuh Server" \
+            --timeout-seconds 5400 \
+            --query "Command.CommandId" --output text)
+
+          echo "SSM Command ID: $COMMAND_ID"
+
+          # Poll every 5 s — up to 90 min — matching --timeout-seconds above.
+          # send-command returns immediately on delivery; we must poll for the
+          # actual exit status so a failed deploy fails this GitHub job.
+          for i in $(seq 1 1080); do
+            STATUS=$(aws ssm get-command-invocation \
+              --command-id "$COMMAND_ID" \
+              --instance-id "${{ secrets.PRODUCTION_INSTANCE_ID }}" \
+              --query "Status" --output text 2>/dev/null || echo "Pending")
+            echo "[$i/1080] $STATUS"
+            case "$STATUS" in
+              Success)
+                echo "✓ Production deployment succeeded"
+                exit 0 ;;
+              Failed|TimedOut|Cancelled|Cancelling)
+                echo "✗ Production deployment failed: $STATUS"
+                echo "--- SERVER ERROR LOGS ---"
+                aws ssm get-command-invocation \
+                  --command-id "$COMMAND_ID" \
+                  --instance-id "${{ secrets.PRODUCTION_INSTANCE_ID }}" \
+                  --query "StandardErrorContent" --output text
+                echo "--- SERVER OUTPUT LOGS ---"
+                aws ssm get-command-invocation \
+                  --command-id "$COMMAND_ID" \
+                  --instance-id "${{ secrets.PRODUCTION_INSTANCE_ID }}" \
+                  --query "StandardOutputContent" --output text
+                echo "--------------------------"
+                exit 1 ;;
+            esac
+            sleep 5
+          done
+          echo "✗ Timed out waiting for production deployment (90 min)"
+          exit 1
