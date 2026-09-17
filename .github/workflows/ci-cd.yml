@@ -2,18 +2,35 @@ name: Yanfaa Wazuh Deployment - CI/CD Pipeline
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ "master" ]
   pull_request:
-    branches: [ "main" ]
+    branches: [ "master" ]
 
 permissions:
   id-token: write # Required for requesting the OIDC JWT Token
   contents: read  # Required for actions/checkout
 
 jobs:
+  validate-config:
+    name: Validate Configuration
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Validate YAML Syntax
+        run: |
+          sudo apt-get update && sudo apt-get install -y yamllint
+          yamllint -d "{extends: relaxed, rules: {line-length: disable, empty-lines: disable}}" single-node/docker-compose.yml .github/workflows/ci-cd.yml
+
+      - name: Validate Docker Compose Configuration
+        run: |
+          cd single-node
+          INDEXER_USERNAME=dummy INDEXER_PASSWORD=dummy API_USERNAME=dummy API_PASSWORD=dummy DASHBOARD_USERNAME=dummy DASHBOARD_PASSWORD=dummy docker compose config --quiet
+
   deploy-production-ssm:
     name: Deploy to Production via SSM
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: validate-config
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     environment: production
     concurrency:
@@ -31,8 +48,8 @@ jobs:
           COMMAND_ID=$(aws ssm send-command \
             --instance-ids "${{ secrets.PRODUCTION_INSTANCE_ID }}" \
             --document-name "AWS-RunShellScript" \
-            --parameters '{"commands":["su - yanfaa -c \"cd /home/yanfaa/wazuh-docker && git fetch origin main && git reset --hard origin/main && if [ -f deploy.sh ]; then chmod +x deploy.sh && ./deploy.sh main --non-interactive; else cd single-node && docker compose pull && docker compose up -d; fi\""]}' \
-            --comment "Deploying main branch to Wazuh Server" \
+            --parameters '{"commands":["su - yanfaa -c \"cd /home/yanfaa/wazuh-docker && git fetch origin master && git reset --hard origin/master && cd single-node && docker compose pull && docker compose up -d\""]}' \
+            --comment "Deploying master branch to Wazuh Server" \
             --timeout-seconds 5400 \
             --query "Command.CommandId" --output text)
 
