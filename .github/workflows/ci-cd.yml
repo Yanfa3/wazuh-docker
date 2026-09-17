@@ -42,7 +42,7 @@ jobs:
         with:
           role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
           aws-region: eu-west-1
-          
+
       - name: Execute Deployment
         run: |
           COMMAND_ID=$(aws ssm send-command \
