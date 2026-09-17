@@ -3,3 +3,12 @@ single-node/config/wazuh_indexer_ssl_certs/*.key
 multi-node/config/wazuh_indexer_ssl_certs/*.pem
 multi-node/config/wazuh_indexer_ssl_certs/*.key
 *.log
+
+# Local backup files
+*.bak
+
+# Yanfaa AWS Roles Anywhere runtime files
+single-node/config/aws/
+
+# Local environment secrets
+.env.local
