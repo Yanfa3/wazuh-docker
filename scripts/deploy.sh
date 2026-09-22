@@ -103,6 +103,21 @@ if [ -n "$API_PW" ]; then
 fi
 
 # -----------------------------------------------------------------------------
+# 3.7. Sync ossec.conf from host mount into the Docker volume
+# -----------------------------------------------------------------------------
+# The Wazuh container only copies /wazuh-config-mount/etc/ossec.conf into the
+# persistent wazuh_etc volume on FIRST BOOT. Every subsequent restart reads the
+# cached copy from the volume, completely ignoring any changes to the host file.
+# This step forces the sync on every deploy so the container always runs with
+# the latest configuration from /opt/wazuh-secrets/wazuh-manager/ossec.conf.
+echo "==> Syncing ossec.conf from host into the Docker volume..."
+if [ -f "/opt/wazuh-secrets/wazuh-manager/ossec.conf" ]; then
+  docker compose $COMPOSE_OPTS exec -T wazuh.manager \
+    cp /wazuh-config-mount/etc/ossec.conf /var/ossec/etc/ossec.conf
+  echo "    ossec.conf synced successfully."
+fi
+
+# -----------------------------------------------------------------------------
 # 4. Pull latest images and deploy
 # -----------------------------------------------------------------------------
 echo "==> [2/3] Pulling latest Docker images..."
@@ -110,7 +125,7 @@ docker compose $COMPOSE_OPTS pull -q
 
 echo "==> [3/3] Deploying..."
 if [ "$FULL_RESTART" = "true" ]; then
-  echo "    Full restart required (new certificates)"
+  echo "    Full restart required (new certificates or API password reset)"
   docker compose $COMPOSE_OPTS down
   docker compose $COMPOSE_OPTS up -d
   echo "    All services restarted with new certificates"
