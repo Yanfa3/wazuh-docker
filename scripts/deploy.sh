@@ -83,6 +83,26 @@ else
 fi
 
 # -----------------------------------------------------------------------------
+# 3.5. Ensure API Password is synchronized
+# -----------------------------------------------------------------------------
+echo "==> Checking API password synchronization..."
+# We test if the manager's internal rbac.db matches the .env.local API_PASSWORD.
+# If it returns 401 Unauthorized, we safely delete rbac.db. The manager will
+# automatically recreate it on restart using the environment variables!
+API_PW=$(grep -oP '(?<=API_PASSWORD=).*' "$WAZUH_DIR/.env.local" || true)
+if [ -n "$API_PW" ]; then
+  # Test the API (returns 000 if container is down)
+  HTTP_STATUS=$(docker compose $COMPOSE_OPTS exec -T wazuh.manager curl -sk -o /dev/null -w "%{http_code}" -X GET -u "wazuh-wui:$API_PW" https://127.0.0.1:55000/security/user/authenticate || echo "000")
+  if [ "$HTTP_STATUS" = "401" ]; then
+      echo "    [!] API Password mismatch detected! Scheduling rbac.db rebuild..."
+      docker compose $COMPOSE_OPTS exec -T wazuh.manager rm -f /var/ossec/api/configuration/security/rbac.db
+      FULL_RESTART=true
+  else
+      echo "    API Password is synchronized (Status: $HTTP_STATUS)"
+  fi
+fi
+
+# -----------------------------------------------------------------------------
 # 4. Pull latest images and deploy
 # -----------------------------------------------------------------------------
 echo "==> [2/3] Pulling latest Docker images..."
