@@ -50,7 +50,7 @@ jobs:
           COMMAND_ID=$(aws ssm send-command \
             --instance-ids "${{ secrets.PRODUCTION_INSTANCE_ID }}" \
             --document-name "AWS-RunShellScript" \
-            --parameters '{"commands":["su - yanfaa -c \"cd /home/yanfaa/wazuh-docker && git fetch origin master && git reset --hard origin/master && cd single-node && if [ ! -f ./config/wazuh_indexer_ssl_certs/wazuh.indexer.pem ]; then docker compose -f generate-indexer-certs.yml run --rm generator; fi && docker compose --env-file ../.env --env-file ../.env.local pull -q && docker compose --env-file ../.env --env-file ../.env.local up -d\""]}' \
+            --parameters '{"commands":["su - yanfaa -c \"cd /home/yanfaa/wazuh-docker && git fetch origin master && git reset --hard origin/master && cd single-node && if [ ! -f ./config/wazuh_indexer_ssl_certs/wazuh.indexer.pem ]; then docker compose -f generate-indexer-certs.yml run --rm generator; fi && docker compose --env-file ../.env --env-file ../.env.local pull -q && docker compose --env-file ../.env --env-file ../.env.local up -d && docker compose --env-file ../.env --env-file ../.env.local restart wazuh.manager\""]}' \
             --comment "Deploying master branch to Wazuh Server" \
             --timeout-seconds 5400 \
             --query "Command.CommandId" --output text)
