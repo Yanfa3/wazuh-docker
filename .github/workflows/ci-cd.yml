@@ -47,10 +47,24 @@ jobs:
 
       - name: Execute Deployment
         run: |
+          # Build SSM JSON params using jq (handles all JSON escaping automatically).
+          # Three sequential commands run on the server:
+          #   1. (root)  Fix cert dir ownership so yanfaa can read/delete it
+          #   2. (yanfaa) git pull + run deploy.sh (cert check, regen if needed, restart)
+          #   3. (root)  Fix cert dir ownership again after Docker may re-create it as root
+          CERT_DIR="/home/yanfaa/wazuh-docker/single-node/config/wazuh_indexer_ssl_certs"
+          FIX_PERMS="[ -d \"${CERT_DIR}\" ] && chown -R yanfaa:yanfaa \"${CERT_DIR}\" && chmod 755 \"${CERT_DIR}\" || true"
+          DEPLOY_CMD='su - yanfaa -c "cd /home/yanfaa/wazuh-docker && git fetch origin master && git reset --hard origin/master && bash scripts/deploy.sh"'
+
+          PARAMS=$(jq -n \
+            --arg fix  "$FIX_PERMS" \
+            --arg deploy "$DEPLOY_CMD" \
+            '{"commands": [$fix, $deploy, $fix]}')
+
           COMMAND_ID=$(aws ssm send-command \
             --instance-ids "${{ secrets.PRODUCTION_INSTANCE_ID }}" \
             --document-name "AWS-RunShellScript" \
-            --parameters '{"commands":["su - yanfaa -c \"cd /home/yanfaa/wazuh-docker && git fetch origin master && git reset --hard origin/master && bash scripts/deploy.sh\""]}' \
+            --parameters "$PARAMS" \
             --comment "Deploying master branch to Wazuh Server" \
             --timeout-seconds 5400 \
             --query "Command.CommandId" --output text)
