@@ -50,7 +50,7 @@ jobs:
           COMMAND_ID=$(aws ssm send-command \
             --instance-ids "${{ secrets.PRODUCTION_INSTANCE_ID }}" \
             --document-name "AWS-RunShellScript" \
-            --parameters '{"commands":["su - yanfaa -c \"bash /home/yanfaa/wazuh-docker/scripts/deploy.sh\""]}' \
+            --parameters '{"commands":["su - yanfaa -c \"cd /home/yanfaa/wazuh-docker && git fetch origin master && git reset --hard origin/master && bash scripts/deploy.sh\""]}' \
             --comment "Deploying master branch to Wazuh Server" \
             --timeout-seconds 5400 \
             --query "Command.CommandId" --output text)

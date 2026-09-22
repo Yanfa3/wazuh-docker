@@ -16,19 +16,12 @@ SINGLE_NODE_DIR="$WAZUH_DIR/single-node"
 CERT_DIR="$SINGLE_NODE_DIR/config/wazuh_indexer_ssl_certs"
 COMPOSE_OPTS="--env-file $WAZUH_DIR/.env --env-file $WAZUH_DIR/.env.local"
 
-# -----------------------------------------------------------------------------
-# 1. Pull latest code
-# -----------------------------------------------------------------------------
-echo "==> [1/4] Pulling latest code from origin/master..."
-cd "$WAZUH_DIR"
-git fetch origin master
-git reset --hard origin/master
 cd "$SINGLE_NODE_DIR"
 
 # -----------------------------------------------------------------------------
 # 2. Validate SSL certificate health
 # -----------------------------------------------------------------------------
-echo "==> [2/4] Validating SSL certificates..."
+echo "==> [1/3] Validating SSL certificates..."
 CERTS_VALID=true
 
 # Check all required cert files exist
@@ -92,10 +85,10 @@ fi
 # -----------------------------------------------------------------------------
 # 4. Pull latest images and deploy
 # -----------------------------------------------------------------------------
-echo "==> [3/4] Pulling latest Docker images..."
+echo "==> [2/3] Pulling latest Docker images..."
 docker compose $COMPOSE_OPTS pull -q
 
-echo "==> [4/4] Deploying..."
+echo "==> [3/3] Deploying..."
 if [ "$FULL_RESTART" = "true" ]; then
   echo "    Full restart required (new certificates)"
   docker compose $COMPOSE_OPTS down
