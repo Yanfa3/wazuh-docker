@@ -12,3 +12,4 @@ single-node/config/aws/
 
 # Local environment secrets
 .env.local
+.env
