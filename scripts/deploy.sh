@@ -131,7 +131,7 @@ fi
 # 4. Pull latest images and deploy
 # -----------------------------------------------------------------------------
 echo "==> [2/3] Pulling latest Docker images..."
-docker compose $COMPOSE_OPTS pull -q
+docker compose $COMPOSE_OPTS pull -q --ignore-buildable
 
 echo "==> [3/3] Deploying..."
 if [ "$FULL_RESTART" = "true" ]; then
