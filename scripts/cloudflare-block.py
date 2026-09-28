@@ -97,6 +97,47 @@ def block_ip(ip):
         log(f"Exception while calling Cloudflare API: {e}")
         send_slack(f"❌ *Wazuh Active Response* | Exception while calling Cloudflare API for `{ip}`: {e}")
 
+def unblock_ip(ip):
+    # Step 1: Find the Rule ID for this IP
+    search_url = f"https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/firewall/access_rules/rules?mode=block&configuration.target=ip&configuration.value={ip}"
+    headers = {
+        "Authorization": f"Bearer {CF_API_TOKEN}",
+        "Content-Type": "application/json"
+    }
+    
+    try:
+        req = urllib.request.Request(search_url, headers=headers)
+        with urllib.request.urlopen(req, timeout=10) as response:
+            data = json.loads(response.read().decode())
+            results = data.get("result", [])
+            
+            if not results:
+                log(f"IP {ip} not found in Cloudflare blocklist. Nothing to unban.")
+                return
+                
+            rule_id = results[0].get("id")
+            
+    except Exception as e:
+        log(f"Failed to search Cloudflare API for IP {ip}: {e}")
+        return
+        
+    # Step 2: Delete the Rule
+    delete_url = f"https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/firewall/access_rules/rules/{rule_id}"
+    try:
+        req = urllib.request.Request(delete_url, headers=headers, method="DELETE")
+        with urllib.request.urlopen(req, timeout=10) as response:
+            data = json.loads(response.read().decode())
+            if response.status == 200 and data.get("success"):
+                log(f"Successfully unblocked IP {ip} at Cloudflare.")
+                send_slack(f"♻️ *Wazuh Active Response* | Successfully unblocked IP `{ip}` at Cloudflare (Timeout expired).")
+    except urllib.error.HTTPError as e:
+        error_data = e.read().decode()
+        log(f"Failed to delete Cloudflare rule for IP {ip}. Error: {error_data}")
+        send_slack(f"❌ *Wazuh Active Response* | Failed to unblock IP `{ip}` at Cloudflare. Error: {error_data}")
+    except Exception as e:
+        log(f"Exception while calling Cloudflare DELETE API for {ip}: {e}")
+        send_slack(f"❌ *Wazuh Active Response* | Exception while deleting Cloudflare rule for `{ip}`: {e}")
+
 def main():
     # Wazuh >= 4.2 passes arguments as a JSON string via stdin
     input_str = sys.stdin.readline()
@@ -107,9 +148,7 @@ def main():
         alert = json.loads(input_str)
         command = alert.get("command")
         
-        # We only handle 'add' commands (blocks). 
-        # For 'delete' (unbans), you would call the Cloudflare DELETE API endpoint.
-        if command != "add":
+        if command not in ["add", "delete"]:
             return
             
         parameters = alert.get("parameters", {})
@@ -128,8 +167,12 @@ def main():
         if not srcip or srcip == "127.0.0.1":
             return
             
-        log(f"Triggered Cloudflare block for {srcip}")
-        block_ip(srcip)
+        if command == "add":
+            log(f"Triggered Cloudflare block for {srcip}")
+            block_ip(srcip)
+        elif command == "delete":
+            log(f"Triggered Cloudflare unblock for {srcip}")
+            unblock_ip(srcip)
         
     except json.JSONDecodeError:
         log("Error parsing JSON input from Wazuh.")
