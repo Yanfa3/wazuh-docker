@@ -38,19 +38,75 @@ def log(msg):
     with open(LOG_FILE, "a") as f:
         f.write(f"cloudflare-block.py: {msg}\n")
 
-def send_slack(msg):
+def send_slack(payload):
     if SLACK_WEBHOOK_URL:
+        if isinstance(payload, str):
+            payload = {"text": payload}
         try:
             req = urllib.request.Request(
                 SLACK_WEBHOOK_URL, 
-                data=json.dumps({"text": msg}).encode('utf-8'),
+                data=json.dumps(payload).encode('utf-8'),
                 headers={'Content-Type': 'application/json'}
             )
             urllib.request.urlopen(req, timeout=5)
         except Exception as e:
             log(f"Failed to send Slack alert: {e}")
 
-def block_ip(ip):
+def build_slack_payload(alert_data, action, ip):
+    if not alert_data:
+        return f"Wazuh Active Response | Successfully {action.lower()}ed IP {ip} at Cloudflare."
+        
+    rule = alert_data.get("rule", {})
+    agent = alert_data.get("agent", {})
+    mitre = rule.get("mitre", {})
+    
+    rule_id = rule.get("id", "N/A")
+    rule_level = rule.get("level", "N/A")
+    rule_desc = rule.get("description", "N/A")
+    
+    mitre_ids = mitre.get("id", [""])
+    mitre_techs = mitre.get("technique", [""])
+    mitre_tactics = mitre.get("tactic", [""])
+    mitre_attck = f"{mitre_ids[0]} — {mitre_techs[0]}" if mitre_ids and mitre_ids[0] else "N/A"
+    mitre_tactic = mitre_tactics[0] if mitre_tactics and mitre_tactics[0] else "N/A"
+    
+    agent_id = agent.get("id", "N/A")
+    agent_name = agent.get("name", "N/A")
+    agent_ip = agent.get("ip", "N/A")
+    
+    log_source = alert_data.get("location", "N/A")
+    timestamp = alert_data.get("timestamp", "N/A")
+    alert_id = alert_data.get("id", "N/A")
+    manager = alert_data.get("manager", {}).get("name", "N/A")
+    
+    if action == "ADD":
+        title = "🚨 WAZUH SECURITY ALERT — IP BLOCKED"
+        action_text = "🔴 BLOCKED"
+    else:
+        title = "♻️ WAZUH SECURITY ALERT — IP UNBLOCKED"
+        action_text = "🟢 UNBLOCKED"
+        
+    text = (
+        f"*{title}*\n"
+        f"*Action* {action_text}\n"
+        f"*Block Type* Temporary (Cloudflare)\n"
+        f"*Source IP* `{ip}`\n"
+        f"*Attack Type* Security Detection\n"
+        f"*Rule* {rule_id} — Level {rule_level}\n"
+        f"*Detection* {rule_desc}\n"
+        f"*MITRE ATT&CK* {mitre_attck}\n"
+        f"*MITRE Tactic* {mitre_tactic}\n"
+        f"*Agent* {agent_id} — {agent_name}\n"
+        f"*Agent IP* {agent_ip}\n"
+        f"*Log Source* {log_source}\n"
+        f"*Time* {timestamp}\n"
+        f"*Active Response* cloudflare-block — {action}\n"
+        f"*Alert ID* {alert_id}\n"
+        f"*Manager* {manager}"
+    )
+    return {"text": text}
+
+def block_ip(ip, alert_data):
     # Cloudflare IP Access Rules API (Account level)
     # Reference: https://developers.cloudflare.com/api/operations/ip-access-rules-for-an-account-create-an-ip-access-rule
     url = f"https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/firewall/access_rules/rules"
@@ -77,7 +133,7 @@ def block_ip(ip):
             data = json.loads(response.read().decode())
             if response.status == 200 and data.get("success"):
                 log(f"Successfully blocked IP {ip} at Cloudflare.")
-                send_slack(f"✅ *Wazuh Active Response* | Successfully blocked IP `{ip}` at Cloudflare.")
+                send_slack(build_slack_payload(alert_data, "ADD", ip))
                 
     except urllib.error.HTTPError as e:
         error_data = e.read().decode()
@@ -97,7 +153,7 @@ def block_ip(ip):
         log(f"Exception while calling Cloudflare API: {e}")
         send_slack(f"❌ *Wazuh Active Response* | Exception while calling Cloudflare API for `{ip}`: {e}")
 
-def unblock_ip(ip):
+def unblock_ip(ip, alert_data):
     # Step 1: Find the Rule ID for this IP
     search_url = f"https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/firewall/access_rules/rules?mode=block&configuration.target=ip&configuration.value={ip}"
     headers = {
@@ -129,7 +185,7 @@ def unblock_ip(ip):
             data = json.loads(response.read().decode())
             if response.status == 200 and data.get("success"):
                 log(f"Successfully unblocked IP {ip} at Cloudflare.")
-                send_slack(f"♻️ *Wazuh Active Response* | Successfully unblocked IP `{ip}` at Cloudflare (Timeout expired).")
+                send_slack(build_slack_payload(alert_data, "DELETE", ip))
     except urllib.error.HTTPError as e:
         error_data = e.read().decode()
         log(f"Failed to delete Cloudflare rule for IP {ip}. Error: {error_data}")
@@ -169,10 +225,10 @@ def main():
             
         if command == "add":
             log(f"Triggered Cloudflare block for {srcip}")
-            block_ip(srcip)
+            block_ip(srcip, alert_data)
         elif command == "delete":
             log(f"Triggered Cloudflare unblock for {srcip}")
-            unblock_ip(srcip)
+            unblock_ip(srcip, alert_data)
         
     except json.JSONDecodeError:
         log("Error parsing JSON input from Wazuh.")
