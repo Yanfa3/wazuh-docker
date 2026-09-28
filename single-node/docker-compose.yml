@@ -1,7 +1,10 @@
 # Wazuh App Copyright (C) 2017, Wazuh Inc. (License GPLv2)
 services:
   wazuh.manager:
-    image: wazuh/wazuh-manager:4.14.7
+    build:
+      context: ../
+      dockerfile: single-node/wazuh-manager.Dockerfile
+    image: custom-wazuh-manager:4.14.7
     hostname: wazuh.manager
     restart: always
     ulimits:
@@ -45,6 +48,8 @@ services:
       - /opt/wazuh-secrets/aws/wazuh/aws_signing_helper:/opt/aws/bin/aws_signing_helper:ro
       - /opt/wazuh-secrets/aws/wazuh/wazuh-client.pem:/opt/aws/wazuh/wazuh-client.pem:ro
       - /opt/wazuh-secrets/aws/wazuh/wazuh-client.key:/opt/aws/wazuh/wazuh-client.key:ro
+      # Custom Active Response Environment Variables
+      - ../.env.local:/var/ossec/active-response/bin/.env.local:ro
 
   wazuh.indexer:
     image: wazuh/wazuh-indexer:4.14.7

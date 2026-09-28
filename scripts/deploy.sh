@@ -110,8 +110,18 @@ fi
 # cached copy from the volume, completely ignoring any changes to the host file.
 # This step forces the sync on every deploy so the container always runs with
 # the latest configuration from /opt/wazuh-secrets/wazuh-manager/ossec.conf.
-echo "==> Syncing ossec.conf from host into the Docker volume..."
-if [ -f "/opt/wazuh-secrets/wazuh-manager/ossec.conf" ]; then
+echo "==> Syncing ossec.conf from Git into the Docker volume..."
+# We generate the final ossec.conf by injecting secrets from .env.local into the Git template
+if [ -f "$SINGLE_NODE_DIR/config/wazuh_cluster/wazuh_manager.conf" ]; then
+  mkdir -p /opt/wazuh-secrets/wazuh-manager/
+  
+  # Export the webhook URL so envsubst can use it
+  export SLACK_WEBHOOK_URL=$(grep -oP '(?<=SLACK_WEBHOOK_URL=).*' "$WAZUH_DIR/.env.local" || true)
+  
+  # Replace ${SLACK_WEBHOOK_URL} in the Git config and save to the secrets directory
+  envsubst '${SLACK_WEBHOOK_URL}' < "$SINGLE_NODE_DIR/config/wazuh_cluster/wazuh_manager.conf" > /opt/wazuh-secrets/wazuh-manager/ossec.conf
+  
+  # Now sync it into the running container
   docker compose $COMPOSE_OPTS exec -T wazuh.manager \
     cp /wazuh-config-mount/etc/ossec.conf /var/ossec/etc/ossec.conf
   echo "    ossec.conf synced successfully."
@@ -127,11 +137,11 @@ echo "==> [3/3] Deploying..."
 if [ "$FULL_RESTART" = "true" ]; then
   echo "    Full restart required (new certificates or API password reset)"
   docker compose $COMPOSE_OPTS down
-  docker compose $COMPOSE_OPTS up -d
+  docker compose $COMPOSE_OPTS up --build -d
   echo "    All services restarted with new certificates"
 else
   echo "    Config-only deploy (restarting wazuh.manager to reload config)"
-  docker compose $COMPOSE_OPTS up -d
+  docker compose $COMPOSE_OPTS up --build -d
   docker compose $COMPOSE_OPTS restart wazuh.manager
   echo "    wazuh.manager restarted with latest config"
 fi
