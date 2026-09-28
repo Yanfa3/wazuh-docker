@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 import sys
 import json
-import requests
-
+import urllib.request
+import urllib.error
 import os
 
 # ==========================================
@@ -41,7 +41,12 @@ def log(msg):
 def send_slack(msg):
     if SLACK_WEBHOOK_URL:
         try:
-            requests.post(SLACK_WEBHOOK_URL, json={"text": msg}, timeout=5)
+            req = urllib.request.Request(
+                SLACK_WEBHOOK_URL, 
+                data=json.dumps({"text": msg}).encode('utf-8'),
+                headers={'Content-Type': 'application/json'}
+            )
+            urllib.request.urlopen(req, timeout=5)
         except Exception as e:
             log(f"Failed to send Slack alert: {e}")
 
@@ -63,22 +68,31 @@ def block_ip(ip):
     }
     
     try:
-        response = requests.post(url, headers=headers, json=payload, timeout=10)
-        data = response.json()
+        req = urllib.request.Request(
+            url, 
+            data=json.dumps(payload).encode('utf-8'), 
+            headers=headers
+        )
+        with urllib.request.urlopen(req, timeout=10) as response:
+            data = json.loads(response.read().decode())
+            if response.status == 200 and data.get("success"):
+                log(f"Successfully blocked IP {ip} at Cloudflare.")
+                send_slack(f"✅ *Wazuh Active Response* | Successfully blocked IP `{ip}` at Cloudflare.")
+                
+    except urllib.error.HTTPError as e:
+        error_data = e.read().decode()
+        try:
+            data = json.loads(error_data)
+            if e.code == 400 and "already exists" in str(data.get("errors")):
+                log(f"IP {ip} is already blocked at Cloudflare.")
+                return
+            err = data.get("errors", error_data)
+        except json.JSONDecodeError:
+            err = error_data
+            
+        log(f"Failed to block IP {ip} at Cloudflare. Error: {err}")
+        send_slack(f"❌ *Wazuh Active Response* | Failed to block IP `{ip}` at Cloudflare. Error: {err}")
         
-        if response.status_code == 200 and data.get("success"):
-            log(f"Successfully blocked IP {ip} at Cloudflare.")
-            send_slack(f"✅ *Wazuh Active Response* | Successfully blocked IP `{ip}` at Cloudflare.")
-            
-        elif response.status_code == 400 and "already exists" in str(data.get("errors")):
-            log(f"IP {ip} is already blocked at Cloudflare.")
-            # We don't send a Slack alert here to avoid spamming for duplicates
-            
-        else:
-            err = data.get("errors", response.text)
-            log(f"Failed to block IP {ip} at Cloudflare. Error: {err}")
-            send_slack(f"❌ *Wazuh Active Response* | Failed to block IP `{ip}` at Cloudflare. Error: {err}")
-            
     except Exception as e:
         log(f"Exception while calling Cloudflare API: {e}")
         send_slack(f"❌ *Wazuh Active Response* | Exception while calling Cloudflare API for `{ip}`: {e}")
