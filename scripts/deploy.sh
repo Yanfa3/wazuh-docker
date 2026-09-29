@@ -113,13 +113,13 @@ fi
 echo "==> Syncing ossec.conf from Git into the Docker volume..."
 # We generate the final ossec.conf by injecting secrets from .env.local into the Git template
 if [ -f "$SINGLE_NODE_DIR/config/wazuh_cluster/wazuh_manager.conf" ]; then
-  sudo mkdir -p /opt/wazuh-secrets/wazuh-manager/
+  mkdir -p /opt/wazuh-secrets/wazuh-manager/
   
   # Export the webhook URL so envsubst can use it
   export SLACK_WEBHOOK_URL=$(grep -oP '(?<=SLACK_WEBHOOK_URL=).*' "$WAZUH_DIR/.env.local" || true)
   
   # Replace ${SLACK_WEBHOOK_URL} in the Git config and save to the secrets directory
-  envsubst '${SLACK_WEBHOOK_URL}' < "$SINGLE_NODE_DIR/config/wazuh_cluster/wazuh_manager.conf" | sudo tee /opt/wazuh-secrets/wazuh-manager/ossec.conf > /dev/null
+  envsubst '${SLACK_WEBHOOK_URL}' < "$SINGLE_NODE_DIR/config/wazuh_cluster/wazuh_manager.conf" > /opt/wazuh-secrets/wazuh-manager/ossec.conf
   
   # Now sync it into the running container
   docker compose $COMPOSE_OPTS exec -T wazuh.manager \
