@@ -80,11 +80,11 @@ def build_slack_payload(alert_data, action, ip):
     manager = alert_data.get("manager", {}).get("name", "N/A")
     
     if action == "ADD":
-        title = "🚨 WAZUH SECURITY ALERT — IP BLOCKED"
-        action_text = "🔴 BLOCKED"
+        title = "🚨 WAZUH SECURITY ALERT — CLOUDFLARE IP BLOCKED"
+        action_text = "🔴 BLOCKED AT EDGE WAF"
     else:
-        title = "♻️ WAZUH SECURITY ALERT — IP UNBLOCKED"
-        action_text = "🟢 UNBLOCKED"
+        title = "♻️ WAZUH SECURITY ALERT — CLOUDFLARE IP UNBLOCKED"
+        action_text = "🟢 UNBLOCKED AT EDGE WAF"
         
     text = (
         f"*{title}*\n"
@@ -139,7 +139,7 @@ def block_ip(ip, alert_data):
         error_data = e.read().decode()
         try:
             data = json.loads(error_data)
-            if e.code == 400 and "already exists" in str(data.get("errors")):
+            if e.code == 400 and ("already exists" in str(data.get("errors")) or "duplicate_of_existing" in str(data.get("errors"))):
                 log(f"IP {ip} is already blocked at Cloudflare.")
                 return
             err = data.get("errors", error_data)
