@@ -4,6 +4,7 @@ import json
 import urllib.request
 import urllib.error
 import os
+import ipaddress
 
 # ==========================================
 # CONFIGURATION
@@ -30,6 +31,8 @@ env_config = load_env(ENV_FILE)
 CF_API_TOKEN = env_config.get("CF_API_TOKEN", "")
 CF_ACCOUNT_ID = env_config.get("CF_ACCOUNT_ID", "")
 SLACK_WEBHOOK_URL = env_config.get("SLACK_WEBHOOK_URL", "")
+SAFE_IPS_RAW = env_config.get("SAFE_IPS", "127.0.0.1")
+SAFE_IPS = [ip.strip() for ip in SAFE_IPS_RAW.split(",") if ip.strip()]
 # ==========================================
 
 LOG_FILE = "/var/ossec/logs/active-responses.log"
@@ -194,6 +197,23 @@ def unblock_ip(ip, alert_data):
         log(f"Exception while calling Cloudflare DELETE API for {ip}: {e}")
         send_slack(f"❌ *Wazuh Active Response* | Exception while deleting Cloudflare rule for `{ip}`: {e}")
 
+def is_safe_ip(ip_str):
+    if not ip_str:
+        return True
+    try:
+        ip_obj = ipaddress.ip_address(ip_str)
+        for safe in SAFE_IPS:
+            try:
+                if ip_obj in ipaddress.ip_network(safe, strict=False):
+                    return True
+            except ValueError:
+                # Fallback if network parsing fails
+                if ip_str == safe:
+                    return True
+    except ValueError:
+        pass
+    return False
+
 def main():
     # Wazuh >= 4.2 passes arguments as a JSON string via stdin
     input_str = sys.stdin.readline()
@@ -219,8 +239,9 @@ def main():
         elif "srcip" in alert_data:
             srcip = alert_data["srcip"]
             
-        # Ignore localhost or missing IPs
-        if not srcip or srcip == "127.0.0.1":
+        # Ignore safe IPs or missing IPs
+        if is_safe_ip(srcip):
+            log(f"Ignoring action for safe/missing IP: {srcip}")
             return
             
         if command == "add":
