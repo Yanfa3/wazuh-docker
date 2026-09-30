@@ -24,3 +24,4 @@
   - [Configuration files](ref/configuration/configuration-files.md)
 - [Upgrade](ref/upgrade.md)
 - [Glossary](ref/glossary.md)
+- [Known Issues](ref/known-issues.md)
