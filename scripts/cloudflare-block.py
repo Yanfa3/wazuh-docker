@@ -5,6 +5,7 @@ import urllib.request
 import urllib.error
 import os
 import ipaddress
+from datetime import datetime
 
 # ==========================================
 # CONFIGURATION
@@ -57,57 +58,181 @@ def send_slack(payload):
 
 def build_slack_payload(alert_data, action, ip):
     if not alert_data:
-        return f"Wazuh Active Response | Successfully {action.lower()}ed IP {ip} at Cloudflare."
-        
+        return {
+            "text": f"Wazuh Active Response | Successfully {action.lower()}ed IP `{ip}` at Cloudflare."
+        }
+
     rule = alert_data.get("rule", {})
     agent = alert_data.get("agent", {})
+    manager = alert_data.get("manager", {})
     mitre = rule.get("mitre", {})
-    
-    rule_id = rule.get("id", "N/A")
-    rule_level = rule.get("level", "N/A")
-    rule_desc = rule.get("description", "N/A")
-    
-    mitre_ids = mitre.get("id", [""])
-    mitre_techs = mitre.get("technique", [""])
-    mitre_tactics = mitre.get("tactic", [""])
-    mitre_attck = f"{mitre_ids[0]} — {mitre_techs[0]}" if mitre_ids and mitre_ids[0] else "N/A"
-    mitre_tactic = mitre_tactics[0] if mitre_tactics and mitre_tactics[0] else "N/A"
-    
-    agent_id = agent.get("id", "N/A")
-    agent_name = agent.get("name", "N/A")
-    agent_ip = agent.get("ip", "N/A")
-    
-    log_source = alert_data.get("location", "N/A")
-    timestamp = alert_data.get("timestamp", "N/A")
-    alert_id = alert_data.get("id", "N/A")
-    manager = alert_data.get("manager", {}).get("name", "N/A")
-    
+
+    rule_id = str(rule.get("id", "-"))
+    level = rule.get("level", "-")
+    description = rule.get("description", "Unknown detection")
+
+    mitre_ids = mitre.get("id", [])
+    mitre_tactics = mitre.get("tactic", [])
+    mitre_techniques = mitre.get("technique", [])
+
+    agent_id = agent.get("id", "-")
+    agent_name = agent.get("name", "-")
+    agent_ip = agent.get("ip", "-")
+
+    location = alert_data.get("location", "-")
+    timestamp = alert_data.get("timestamp", "-")
+    alert_id = alert_data.get("id", "-")
+    manager_name = manager.get("name", "-")
+
     if action == "ADD":
-        title = "🚨 WAZUH SECURITY ALERT — CLOUDFLARE IP BLOCKED"
         action_text = "🔴 BLOCKED AT EDGE WAF"
-    else:
-        title = "♻️ WAZUH SECURITY ALERT — CLOUDFLARE IP UNBLOCKED"
+        title = "🚨 WAZUH SECURITY ALERT — CLOUDFLARE IP BLOCKED"
+    elif action == "DELETE":
         action_text = "🟢 UNBLOCKED AT EDGE WAF"
-        
-    text = (
-        f"*{title}*\n"
-        f"*Action* {action_text}\n"
-        f"*Block Type* Temporary (Cloudflare)\n"
-        f"*Source IP* `{ip}`\n"
-        f"*Attack Type* Security Detection\n"
-        f"*Rule* {rule_id} — Level {rule_level}\n"
-        f"*Detection* {rule_desc}\n"
-        f"*MITRE ATT&CK* {mitre_attck}\n"
-        f"*MITRE Tactic* {mitre_tactic}\n"
-        f"*Agent* {agent_id} — {agent_name}\n"
-        f"*Agent IP* {agent_ip}\n"
-        f"*Log Source* {log_source}\n"
-        f"*Time* {timestamp}\n"
-        f"*Active Response* cloudflare-block — {action}\n"
-        f"*Alert ID* {alert_id}\n"
-        f"*Manager* {manager}"
-    )
-    return {"text": text}
+        title = "🔓 WAZUH SECURITY ALERT — CLOUDFLARE IP UNBLOCKED"
+    else:
+        action_text = action.upper()
+        title = "⚠️ WAZUH SECURITY ALERT — CLOUDFLARE"
+
+    block_type = "Temporary (Cloudflare)" if action == "ADD" else "Temporary — timeout expired"
+
+    if "ssh" in description.lower():
+        attack_type = "SSH / Authentication Attack"
+    elif "web server" in description.lower() or "400" in description.lower() or "nginx" in description.lower():
+        attack_type = "Web Server Attack"
+    elif "shellshock" in description.lower():
+        attack_type = "Shellshock Attack"
+    elif "crc-32" in description.lower():
+        attack_type = "SSH CRC-32 Attack"
+    elif "pam" in description.lower() or "login" in description.lower():
+        attack_type = "PAM / Authentication Attack"
+    else:
+        attack_type = "Security Detection"
+
+    fields = [
+        {
+            "title": "Action",
+            "value": f"*{action_text}*",
+            "short": True,
+        },
+        {
+            "title": "Block Type",
+            "value": block_type,
+            "short": True,
+        },
+        {
+            "title": "Source IP",
+            "value": f"*`{ip}`*",
+            "short": True,
+        },
+        {
+            "title": "Attack Type",
+            "value": attack_type,
+            "short": True,
+        },
+        {
+            "title": "Rule",
+            "value": f"`{rule_id}` — Level {level}",
+            "short": True,
+        },
+        {
+            "title": "Detection",
+            "value": description,
+            "short": False,
+        },
+    ]
+
+    frequency = rule.get("frequency")
+    timeframe = rule.get("timeframe")
+    if frequency:
+        detection_window = f"{frequency} events"
+        if timeframe:
+            detection_window += f" within {timeframe} seconds"
+        fields.append({
+            "title": "Detection Threshold",
+            "value": detection_window,
+            "short": True,
+        })
+
+    if mitre_ids:
+        if isinstance(mitre_ids, list):
+            mitre_text = ", ".join(str(x) for x in mitre_ids)
+        else:
+            mitre_text = str(mitre_ids)
+
+        if mitre_techniques:
+            if isinstance(mitre_techniques, list):
+                mitre_text += " — " + ", ".join(str(x) for x in mitre_techniques)
+            else:
+                mitre_text += " — " + str(mitre_techniques)
+
+        fields.append({
+            "title": "MITRE ATT&CK",
+            "value": mitre_text,
+            "short": True,
+        })
+
+    if mitre_tactics:
+        if isinstance(mitre_tactics, list):
+            tactic_text = ", ".join(str(x) for x in mitre_tactics)
+        else:
+            tactic_text = str(mitre_tactics)
+
+        fields.append({
+            "title": "MITRE Tactic",
+            "value": tactic_text,
+            "short": True,
+        })
+
+    fields.extend([
+        {
+            "title": "Agent",
+            "value": f"`{agent_id}` — {agent_name}",
+            "short": True,
+        },
+        {
+            "title": "Agent IP",
+            "value": f"`{agent_ip}`",
+            "short": True,
+        },
+        {
+            "title": "Log Source",
+            "value": location,
+            "short": True,
+        },
+        {
+            "title": "Time",
+            "value": timestamp,
+            "short": True,
+        },
+        {
+            "title": "Active Response",
+            "value": f"`cloudflare-block` — `{action.upper()}`",
+            "short": True,
+        },
+        {
+            "title": "Alert ID",
+            "value": f"`{alert_id}`",
+            "short": True,
+        },
+        {
+            "title": "Manager",
+            "value": f"`{manager_name}`",
+            "short": True,
+        },
+    ])
+
+    return {
+        "text": title,
+        "attachments": [
+            {
+                "color": "#d32f2f" if action == "ADD" else "#2e7d32",
+                "fields": fields,
+                "footer": "Wazuh Active Response",
+                "ts": int(datetime.now().timestamp()),
+            }
+        ],
+    }
 
 def block_ip(ip, alert_data):
     # Cloudflare IP Access Rules API (Account level)
