@@ -1,0 +1,369 @@
+import json
+import sys
+import urllib.request
+from datetime import datetime
+
+
+def clean_user(user):
+    if not user:
+        return None
+
+    user = str(user)
+
+    if user.lower().startswith("invalid user "):
+        user = user[13:]
+
+    return user
+
+
+def extract_users(previous_output):
+    users = []
+
+    if not previous_output:
+        return users
+
+    for line in previous_output.splitlines():
+        if "Invalid user " in line:
+            try:
+                user = line.split("Invalid user ", 1)[1].split(" from ", 1)[0]
+                user = clean_user(user)
+
+                if user and user not in users:
+                    users.append(user)
+            except Exception:
+                pass
+
+        elif "Failed password for invalid user " in line:
+            try:
+                user = line.split(
+                    "Failed password for invalid user ", 1
+                )[1].split(" from ", 1)[0]
+
+                user = clean_user(user)
+
+                if user and user not in users:
+                    users.append(user)
+            except Exception:
+                pass
+
+    return users
+
+
+def extract_evidence(previous_output):
+    if not previous_output:
+        return []
+
+    evidence = []
+
+    for line in previous_output.splitlines():
+        line = line.strip()
+
+        if not line:
+            continue
+
+        parts = line.split(" ", 3)
+
+        if len(parts) >= 4:
+            timestamp = f"{parts[0]} {parts[1]}"
+            message = parts[3]
+            evidence.append(f"`{timestamp}` — {message}")
+        else:
+            evidence.append(f"`{line}`")
+
+    return evidence[-10:]
+
+
+def format_timestamp(timestamp):
+    if not timestamp:
+        return "-"
+
+    try:
+        dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+        return dt.strftime("%Y-%m-%d %H:%M:%S UTC")
+    except Exception:
+        return timestamp
+
+
+def send_slack(webhook, payload):
+    body = json.dumps(payload).encode("utf-8")
+
+    request = urllib.request.Request(
+        webhook,
+        data=body,
+        headers={
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+
+    with urllib.request.urlopen(request, timeout=10) as response:
+        if response.status < 200 or response.status >= 300:
+            raise RuntimeError(
+                f"Slack returned HTTP {response.status}"
+            )
+
+
+def main():
+    if len(sys.argv) < 4:
+        sys.exit(1)
+
+    alert_file = sys.argv[1]
+    webhook = sys.argv[3]
+
+    with open(alert_file, "r") as f:
+        alert = json.load(f)
+
+    # Active Response alert structure:
+    # alert.data.parameters.alert = original Wazuh detection
+    # alert.data.command = add/delete
+    ar_data = alert.get("data", {})
+    original_alert = ar_data.get("parameters", {}).get("alert", {})
+
+    if not original_alert:
+        original_alert = alert
+
+    rule = original_alert.get("rule", {})
+    agent = original_alert.get("agent", {})
+    manager = original_alert.get("manager", {})
+
+    rule_id = str(rule.get("id", "-"))
+    level = rule.get("level", "-")
+    description = rule.get("description", "Unknown detection")
+
+    command = ar_data.get("command", alert.get("command", "-")).lower()
+
+    alert_data = original_alert.get("data", {})
+
+    source_ip = (
+        alert_data.get("srcip")
+        or alert_data.get("src_ip")
+        or "-"
+    )
+
+    source_user = (
+        alert_data.get("srcuser")
+        or alert_data.get("src_user")
+        or None
+    )
+
+    previous_output = original_alert.get("previous_output", "")
+
+    users = extract_users(previous_output)
+
+    if source_user:
+        source_user = clean_user(source_user)
+
+        if source_user and source_user not in users:
+            users.append(source_user)
+
+    evidence = extract_evidence(previous_output)
+
+    frequency = rule.get("frequency")
+    timeframe = rule.get("timeframe")
+
+    mitre = rule.get("mitre", {})
+    mitre_ids = mitre.get("id", [])
+    mitre_tactics = mitre.get("tactic", [])
+    mitre_techniques = mitre.get("technique", [])
+
+    agent_id = agent.get("id", "-")
+    agent_name = agent.get("name", "-")
+    agent_ip = agent.get("ip", "-")
+
+    location = original_alert.get("location", "-")
+    alert_timestamp = format_timestamp(original_alert.get("timestamp"))
+
+    alert_id = original_alert.get("id", alert.get("id", "-"))
+    manager_name = manager.get("name", "-")
+
+    if command == "add":
+        action = "🔴 BLOCKED"
+        title = "🚨 WAZUH SECURITY ALERT — IP BLOCKED"
+    elif command == "delete":
+        action = "🟢 UNBLOCKED"
+        title = "🔓 WAZUH SECURITY ALERT — IP UNBLOCKED"
+    else:
+        action = command.upper()
+        title = "⚠️ WAZUH SECURITY ALERT"
+
+    # Rules mapped to firewall-drop-permanent (<timeout_allowed>no</timeout_allowed>)
+    # Keep this in sync with the active-response blocks in ossec.conf
+    permanent_rules = {
+        "5503",   # PAM: User login failed (Password Guessing - T1110.001)
+        "5712",   # SSHD: Multiple authentication failures
+        "5720",   # SSHD: Multiple SSHD authentication failures
+        "5763",   # SSHD: SSHD brute force (multiple attempts)
+        "31151",  # Nginx: Multiple 400 errors (Vulnerability Scanning - T1595.002)
+    }
+
+    if command == "add":
+        block_type = (
+            "Permanent"
+            if rule_id in permanent_rules
+            else "Temporary"
+        )
+    elif command == "delete":
+        block_type = "Temporary — timeout expired"
+    else:
+        block_type = "-"
+
+    if "ssh" in description.lower():
+        attack_type = "SSH / Authentication Attack"
+    elif "web server" in description.lower():
+        attack_type = "Web Server Attack"
+    elif "shellshock" in description.lower():
+        attack_type = "Shellshock Attack"
+    elif "crc-32" in description.lower():
+        attack_type = "SSH CRC-32 Attack"
+    elif "pam" in description.lower() or "login" in description.lower():
+        attack_type = "PAM / Authentication Attack"
+    else:
+        attack_type = "Security Detection"
+
+    fields = [
+        {
+            "title": "Action",
+            "value": f"*{action}*",
+            "short": True,
+        },
+        {
+            "title": "Block Type",
+            "value": block_type,
+            "short": True,
+        },
+        {
+            "title": "Source IP",
+            "value": f"*`{source_ip}`*",
+            "short": True,
+        },
+        {
+            "title": "Attack Type",
+            "value": attack_type,
+            "short": True,
+        },
+        {
+            "title": "Rule",
+            "value": f"`{rule_id}` — Level {level}",
+            "short": True,
+        },
+        {
+            "title": "Detection",
+            "value": description,
+            "short": False,
+        },
+    ]
+
+    if frequency:
+        detection_window = f"{frequency} events"
+
+        if timeframe:
+            detection_window += f" within {timeframe} seconds"
+
+        fields.append({
+            "title": "Detection Threshold",
+            "value": detection_window,
+            "short": True,
+        })
+
+    if mitre_ids:
+        mitre_text = ", ".join(str(x) for x in mitre_ids)
+
+        if mitre_techniques:
+            mitre_text += " — " + ", ".join(
+                str(x) for x in mitre_techniques
+            )
+
+        fields.append({
+            "title": "MITRE ATT&CK",
+            "value": mitre_text,
+            "short": True,
+        })
+
+    if mitre_tactics:
+        fields.append({
+            "title": "MITRE Tactic",
+            "value": ", ".join(
+                str(x) for x in mitre_tactics
+            ),
+            "short": True,
+        })
+
+    if source_user:
+        fields.append({
+            "title": "Source User",
+            "value": f"`{source_user}`",
+            "short": True,
+        })
+
+    if users:
+        fields.append({
+            "title": "Users Targeted",
+            "value": ", ".join(f"`{u}`" for u in users),
+            "short": False,
+        })
+
+    fields.extend([
+        {
+            "title": "Agent",
+            "value": f"`{agent_id}` — {agent_name}",
+            "short": True,
+        },
+        {
+            "title": "Agent IP",
+            "value": f"`{agent_ip}`",
+            "short": True,
+        },
+        {
+            "title": "Log Source",
+            "value": location,
+            "short": True,
+        },
+        {
+            "title": "Time",
+            "value": alert_timestamp,
+            "short": True,
+        },
+    ])
+
+    if evidence:
+        fields.append({
+            "title": "Evidence",
+            "value": "\n".join(evidence),
+            "short": False,
+        })
+
+    fields.extend([
+        {
+            "title": "Active Response",
+            "value": f"`firewall-drop` — `{command.upper()}`",
+            "short": True,
+        },
+        {
+            "title": "Alert ID",
+            "value": f"`{alert_id}`",
+            "short": True,
+        },
+        {
+            "title": "Manager",
+            "value": f"`{manager_name}`",
+            "short": True,
+        },
+    ])
+
+    payload = {
+        "text": title,
+        "attachments": [
+            {
+                "color": "#d32f2f" if command == "add" else "#2e7d32",
+                "fields": fields,
+                "footer": "Wazuh Active Response",
+                "ts": int(datetime.now().timestamp()),
+            }
+        ],
+    }
+
+    send_slack(webhook, payload)
+
+
+if __name__ == "__main__":
+    main()
