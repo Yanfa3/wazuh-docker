@@ -103,15 +103,11 @@ if [ -n "$API_PW" ]; then
 fi
 
 # -----------------------------------------------------------------------------
-# 3.7. Sync ossec.conf from host mount into the Docker volume
+# 3.7. Sync ossec.conf and custom integrations from Git into Docker volumes
 # -----------------------------------------------------------------------------
-# The Wazuh container only copies /wazuh-config-mount/etc/ossec.conf into the
-# persistent wazuh_etc volume on FIRST BOOT. Every subsequent restart reads the
-# cached copy from the volume, completely ignoring any changes to the host file.
-# This step forces the sync on every deploy so the container always runs with
-# the latest configuration from /opt/wazuh-secrets/wazuh-manager/ossec.conf.
+# Docker volumes persist across image builds. Files in volume paths (like /var/ossec/integrations
+# and /var/ossec/etc) shadow any new files baked into the image. We explicitly sync them here.
 echo "==> Syncing ossec.conf from Git into the Docker volume..."
-# We generate the final ossec.conf by injecting secrets from .env.local into the Git template
 if [ -f "$SINGLE_NODE_DIR/config/wazuh_cluster/wazuh_manager.conf" ]; then
   mkdir -p /opt/wazuh-secrets/wazuh-manager/
   
@@ -144,6 +140,25 @@ else
   docker compose $COMPOSE_OPTS up --build -d
   docker compose $COMPOSE_OPTS restart wazuh.manager
   echo "    wazuh.manager restarted with latest config"
+fi
+
+# -----------------------------------------------------------------------------
+# 5. Sync custom integrations into the (now running) Docker volume
+# -----------------------------------------------------------------------------
+# Must run AFTER docker compose up --build so we target the correct container ID.
+# The wazuh_integrations volume persists across image rebuilds, so files baked
+# into the image are shadowed by the volume contents unless explicitly synced.
+echo "==> Syncing custom-wazuh-slack integration into the Docker volume..."
+if [ -f "$WAZUH_DIR/scripts/custom-wazuh-slack" ]; then
+  MANAGER_CONTAINER=$(docker compose $COMPOSE_OPTS ps -q wazuh.manager 2>/dev/null || echo "")
+  if [ -n "$MANAGER_CONTAINER" ]; then
+    docker cp "$WAZUH_DIR/scripts/custom-wazuh-slack" "${MANAGER_CONTAINER}:/var/ossec/integrations/custom-wazuh-slack"
+    docker compose $COMPOSE_OPTS exec -T wazuh.manager chown root:wazuh /var/ossec/integrations/custom-wazuh-slack
+    docker compose $COMPOSE_OPTS exec -T wazuh.manager chmod 750 /var/ossec/integrations/custom-wazuh-slack
+    echo "    custom-wazuh-slack synced successfully."
+  else
+    echo "    WARNING: wazuh.manager container not found, skipping custom-wazuh-slack sync."
+  fi
 fi
 
 echo ""
