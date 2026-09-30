@@ -161,5 +161,26 @@ if [ -f "$WAZUH_DIR/scripts/custom-wazuh-slack" ]; then
   fi
 fi
 
+# -----------------------------------------------------------------------------
+# 6. Sync custom rules into the (now running) Docker volume
+# -----------------------------------------------------------------------------
+# The wazuh_etc volume mounts over /var/ossec/etc/ (including /etc/rules/),
+# shadowing anything COPY'd by the Dockerfile. Rules must be injected here
+# after startup and wazuh-analysisd sent SIGHUP to hot-reload them.
+echo "==> Syncing custom-cloudtrail-rules.xml into the Docker volume..."
+if [ -f "$WAZUH_DIR/scripts/custom-cloudtrail-rules.xml" ]; then
+  MANAGER_CONTAINER=$(docker compose $COMPOSE_OPTS ps -q wazuh.manager 2>/dev/null || echo "")
+  if [ -n "$MANAGER_CONTAINER" ]; then
+    docker cp "$WAZUH_DIR/scripts/custom-cloudtrail-rules.xml" "${MANAGER_CONTAINER}:/var/ossec/etc/rules/custom-cloudtrail-rules.xml"
+    docker compose $COMPOSE_OPTS exec -T wazuh.manager chown root:wazuh /var/ossec/etc/rules/custom-cloudtrail-rules.xml
+    docker compose $COMPOSE_OPTS exec -T wazuh.manager chmod 640 /var/ossec/etc/rules/custom-cloudtrail-rules.xml
+    # Reload rules in wazuh.manager
+    docker compose $COMPOSE_OPTS exec -T wazuh.manager /var/ossec/bin/wazuh-control reload || true
+    echo "    custom-cloudtrail-rules.xml synced and wazuh-control reloaded."
+  else
+    echo "    WARNING: wazuh.manager container not found, skipping custom-cloudtrail-rules.xml sync."
+  fi
+fi
+
 echo ""
 echo "==> Deployment complete"
