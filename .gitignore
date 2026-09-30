@@ -13,3 +13,7 @@ single-node/config/aws/
 # Local environment secrets
 .env.local
 .env
+
+# Python bytecode
+__pycache__/
+*.pyc
