@@ -23,3 +23,12 @@ COPY ./scripts/custom-wazuh-slack /var/ossec/integrations/custom-wazuh-slack
 # Set strict permissions required by Wazuh for integration scripts
 RUN chmod 750 /var/ossec/integrations/custom-wazuh-slack && \
     chown root:wazuh /var/ossec/integrations/custom-wazuh-slack
+
+# ── Custom Rules ──────────────────────────────────────────────────────────────
+
+# Elevate specific CloudTrail IAM write events (CreateUser, DeleteRole, etc.)
+# from Level 3 (rule 80202 catch-all) to Level 7-10 so they trigger Slack alerts
+COPY ./scripts/custom-cloudtrail-rules.xml /var/ossec/etc/rules/custom-cloudtrail-rules.xml
+
+RUN chmod 640 /var/ossec/etc/rules/custom-cloudtrail-rules.xml && \
+    chown root:wazuh /var/ossec/etc/rules/custom-cloudtrail-rules.xml

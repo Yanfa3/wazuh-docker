@@ -1,0 +1,160 @@
+<!-- ─────────────────────────────────────────────────────────────────────────
+     Yanfaa Custom CloudTrail Rules
+     File:    custom-cloudtrail-rules.xml
+     Path:    /var/ossec/etc/rules/custom-cloudtrail-rules.xml
+     Purpose: Elevate specific AWS CloudTrail write events from the default
+              Level 3 (rule 80202) to higher severity levels so they pass the
+              Slack integration threshold (<level>4</level>) and trigger
+              automatic Slack alerts via custom-wazuh-slack.
+
+     Parent rule: 80202 -- generic CloudTrail catch-all (Level 3)
+
+     Rule ID range: 100200-100299 (local custom range, no conflict with
+                    Wazuh built-ins which end at ~99999)
+     ───────────────────────────────────────────────────────────────────────── -->
+<group name="amazon,aws,aws_cloudtrail,aws_iam,">
+
+  <!-- ── IAM User Lifecycle ──────────────────────────────────────────────── -->
+
+  <rule id="100200" level="8">
+    <if_sid>80202</if_sid>
+    <field name="aws.eventName">^CreateUser$</field>
+    <description>AWS CloudTrail: IAM User created - $(aws.requestParameters.userName)</description>
+    <mitre>
+      <id>T1136.003</id>
+    </mitre>
+    <group>aws_cloudtrail,aws_iam,</group>
+  </rule>
+
+  <rule id="100201" level="8">
+    <if_sid>80202</if_sid>
+    <field name="aws.eventName">^DeleteUser$</field>
+    <description>AWS CloudTrail: IAM User deleted - $(aws.requestParameters.userName)</description>
+    <mitre>
+      <id>T1531</id>
+    </mitre>
+    <group>aws_cloudtrail,aws_iam,</group>
+  </rule>
+
+  <!-- ── IAM Access Keys ────────────────────────────────────────────────── -->
+
+  <rule id="100210" level="8">
+    <if_sid>80202</if_sid>
+    <field name="aws.eventName">^CreateAccessKey$</field>
+    <description>AWS CloudTrail: IAM Access Key created for $(aws.requestParameters.userName)</description>
+    <mitre>
+      <id>T1098.001</id>
+    </mitre>
+    <group>aws_cloudtrail,aws_iam,</group>
+  </rule>
+
+  <rule id="100211" level="8">
+    <if_sid>80202</if_sid>
+    <field name="aws.eventName">^DeleteAccessKey$</field>
+    <description>AWS CloudTrail: IAM Access Key deleted for $(aws.requestParameters.userName)</description>
+    <mitre>
+      <id>T1531</id>
+    </mitre>
+    <group>aws_cloudtrail,aws_iam,</group>
+  </rule>
+
+  <!-- ── IAM Roles ──────────────────────────────────────────────────────── -->
+
+  <rule id="100220" level="8">
+    <if_sid>80202</if_sid>
+    <field name="aws.eventName">^CreateRole$</field>
+    <description>AWS CloudTrail: IAM Role created - $(aws.requestParameters.roleName)</description>
+    <mitre>
+      <id>T1136.003</id>
+    </mitre>
+    <group>aws_cloudtrail,aws_iam,</group>
+  </rule>
+
+  <rule id="100221" level="8">
+    <if_sid>80202</if_sid>
+    <field name="aws.eventName">^DeleteRole$</field>
+    <description>AWS CloudTrail: IAM Role deleted - $(aws.requestParameters.roleName)</description>
+    <mitre>
+      <id>T1531</id>
+    </mitre>
+    <group>aws_cloudtrail,aws_iam,</group>
+  </rule>
+
+  <!-- ── IAM Policy Attachments ─────────────────────────────────────────── -->
+
+  <rule id="100230" level="7">
+    <if_sid>80202</if_sid>
+    <field name="aws.eventName">^AttachUserPolicy$</field>
+    <description>AWS CloudTrail: IAM Policy attached to user - $(aws.requestParameters.userName)</description>
+    <mitre>
+      <id>T1098</id>
+    </mitre>
+    <group>aws_cloudtrail,aws_iam,</group>
+  </rule>
+
+  <rule id="100231" level="7">
+    <if_sid>80202</if_sid>
+    <field name="aws.eventName">^AttachRolePolicy$</field>
+    <description>AWS CloudTrail: IAM Policy attached to role - $(aws.requestParameters.roleName)</description>
+    <mitre>
+      <id>T1098</id>
+    </mitre>
+    <group>aws_cloudtrail,aws_iam,</group>
+  </rule>
+
+  <rule id="100232" level="7">
+    <if_sid>80202</if_sid>
+    <field name="aws.eventName">^DetachUserPolicy$</field>
+    <description>AWS CloudTrail: IAM Policy detached from user - $(aws.requestParameters.userName)</description>
+    <mitre>
+      <id>T1098</id>
+    </mitre>
+    <group>aws_cloudtrail,aws_iam,</group>
+  </rule>
+
+  <rule id="100233" level="7">
+    <if_sid>80202</if_sid>
+    <field name="aws.eventName">^DetachRolePolicy$</field>
+    <description>AWS CloudTrail: IAM Policy detached from role - $(aws.requestParameters.roleName)</description>
+    <mitre>
+      <id>T1098</id>
+    </mitre>
+    <group>aws_cloudtrail,aws_iam,</group>
+  </rule>
+
+  <!-- ── IAM Password / Login Profile ──────────────────────────────────── -->
+
+  <rule id="100240" level="8">
+    <if_sid>80202</if_sid>
+    <field name="aws.eventName">^CreateLoginProfile$</field>
+    <description>AWS CloudTrail: Console password created for IAM user - $(aws.requestParameters.userName)</description>
+    <mitre>
+      <id>T1098</id>
+    </mitre>
+    <group>aws_cloudtrail,aws_iam,</group>
+  </rule>
+
+  <rule id="100241" level="7">
+    <if_sid>80202</if_sid>
+    <field name="aws.eventName">^UpdateLoginProfile$</field>
+    <description>AWS CloudTrail: Console password changed for IAM user - $(aws.requestParameters.userName)</description>
+    <mitre>
+      <id>T1098</id>
+    </mitre>
+    <group>aws_cloudtrail,aws_iam,</group>
+  </rule>
+
+  <!-- ── Root Account Write Activity (always Level 10) ─────────────────── -->
+
+  <rule id="100250" level="10">
+    <if_sid>80202</if_sid>
+    <field name="aws.userIdentity.type">^Root$</field>
+    <field name="aws.readOnly">^false$</field>
+    <description>AWS CloudTrail: Root account performed a write action - $(aws.eventName)</description>
+    <mitre>
+      <id>T1078.004</id>
+    </mitre>
+    <group>aws_cloudtrail,aws_iam,pci_dss_10.2.2,</group>
+  </rule>
+
+</group>
