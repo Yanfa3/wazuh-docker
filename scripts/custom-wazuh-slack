@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 import json
 import sys
 import urllib.request
@@ -103,6 +104,222 @@ def send_slack(webhook, payload):
             )
 
 
+# ---------------------------------------------------------------------------
+# CloudTrail alert formatter
+# ---------------------------------------------------------------------------
+
+def _ct_color(level):
+    """Return a Slack attachment colour based on Wazuh alert severity level."""
+    if level >= 12:
+        return "#b71c1c"   # dark red  — critical
+    if level >= 7:
+        return "#e65100"   # orange    — high
+    if level >= 4:
+        return "#f9a825"   # amber     — medium
+    return "#1565c0"       # blue      — informational
+
+
+# Human-readable labels for well-known CloudTrail rule IDs
+_CT_RULE_LABELS = {
+    "80250": "Root Account Used",
+    "80255": "Console Login Failure",
+    "80256": "Console Login Success (root)",
+    "80273": "IAM Access Key Created",
+    "80274": "IAM Access Key Deleted",
+    "80280": "MFA Device Deactivated",
+    "80301": "Security Group Rule Added",
+    "80302": "Security Group Rule Removed",
+    "80321": "S3 Bucket ACL Changed",
+    "80323": "S3 Bucket Policy Changed",
+    "80202": "CloudTrail Logging Altered",
+    "80300": "VPC Created/Modified",
+}
+
+
+def _ct_emoji(level):
+    """Return an emoji prefix based on alert severity."""
+    if level >= 12:
+        return "🚨"
+    if level >= 7:
+        return "⚠️"
+    if level >= 4:
+        return "🟡"
+    return "ℹ️"
+
+
+def handle_cloudtrail_alert(alert, webhook):
+    """Format and send a Slack alert for a CloudTrail (aws-s3 wodle) event."""
+    rule       = alert.get("rule", {})
+    agent      = alert.get("agent", {})
+    manager    = alert.get("manager", {})
+    alert_data = alert.get("data", {})
+
+    rule_id     = str(rule.get("id", "-"))
+    level       = rule.get("level", 0)
+    description = rule.get("description", "AWS CloudTrail Event")
+
+    mitre            = rule.get("mitre", {})
+    mitre_ids        = mitre.get("id", [])
+    mitre_tactics    = mitre.get("tactic", [])
+    mitre_techniques = mitre.get("technique", [])
+
+    # AWS-specific fields live under data.aws
+    aws = alert_data.get("aws", {})
+
+    event_name    = aws.get("eventName", "-")
+    event_source  = aws.get("eventSource", "-")
+    aws_region    = aws.get("awsRegion", "-")
+    source_ip     = aws.get("sourceIPAddress", "-")
+    account_id    = aws.get("aws_account_id") or aws.get("recipientAccountId", "-")
+    event_time    = format_timestamp(aws.get("eventTime"))
+    read_only     = aws.get("readOnly", None)
+    error_code    = aws.get("errorCode", None)
+    error_message = aws.get("errorMessage", None)
+
+    # Log file provenance
+    log_info  = aws.get("log_info", {})
+    s3_bucket = log_info.get("s3bucket", "-")
+
+    # User identity
+    identity      = aws.get("userIdentity", {})
+    identity_type = identity.get("type", "-")
+    identity_arn  = identity.get("arn", None)
+    identity_user = identity.get("userName", None)
+
+    # Resolve a readable identity label
+    if identity_user:
+        identity_label = f"`{identity_user}` ({identity_type})"
+    elif identity_arn:
+        # Shorten long ARNs: keep only the last two path segments
+        arn_parts = identity_arn.split("/")
+        short_arn = "/".join(arn_parts[-2:]) if len(arn_parts) > 2 else identity_arn
+        identity_label = f"`{short_arn}` ({identity_type})"
+    else:
+        identity_label = identity_type
+
+    # Friendly rule label (fallback to rule description)
+    rule_label = _CT_RULE_LABELS.get(rule_id, description)
+
+    emoji = _ct_emoji(level)
+    title = f"{emoji} AWS CLOUDTRAIL ALERT — {rule_label.upper()}"
+
+    fields = [
+        {
+            "title": "Event",
+            "value": f"`{event_name}`",
+            "short": True,
+        },
+        {
+            "title": "Service",
+            "value": event_source,
+            "short": True,
+        },
+        {
+            "title": "Region",
+            "value": f"`{aws_region}`",
+            "short": True,
+        },
+        {
+            "title": "Source IP",
+            "value": f"`{source_ip}`",
+            "short": True,
+        },
+        {
+            "title": "Identity",
+            "value": identity_label,
+            "short": False,
+        },
+        {
+            "title": "AWS Account",
+            "value": f"`{account_id}`",
+            "short": True,
+        },
+        {
+            "title": "Event Time",
+            "value": event_time,
+            "short": True,
+        },
+        {
+            "title": "Rule",
+            "value": f"`{rule_id}` — Level {level}",
+            "short": True,
+        },
+        {
+            "title": "Description",
+            "value": description,
+            "short": False,
+        },
+    ]
+
+    if read_only is not None:
+        fields.append({
+            "title": "Read Only",
+            "value": "Yes" if str(read_only).lower() == "true" else "No",
+            "short": True,
+        })
+
+    if error_code:
+        fields.append({
+            "title": "Error",
+            "value": f"`{error_code}` — {error_message or ''}",
+            "short": False,
+        })
+
+    if mitre_ids:
+        mitre_text = ", ".join(str(x) for x in mitre_ids)
+        if mitre_techniques:
+            mitre_text += " — " + ", ".join(str(x) for x in mitre_techniques)
+        fields.append({
+            "title": "MITRE ATT&CK",
+            "value": mitre_text,
+            "short": True,
+        })
+
+    if mitre_tactics:
+        fields.append({
+            "title": "MITRE Tactic",
+            "value": ", ".join(str(x) for x in mitre_tactics),
+            "short": True,
+        })
+
+    fields.extend([
+        {
+            "title": "S3 Bucket",
+            "value": f"`{s3_bucket}`",
+            "short": True,
+        },
+        {
+            "title": "Agent",
+            "value": f"`{agent.get('id', '-')}` — {agent.get('name', '-')}",
+            "short": True,
+        },
+        {
+            "title": "Alert ID",
+            "value": f"`{alert.get('id', '-')}`",
+            "short": True,
+        },
+        {
+            "title": "Manager",
+            "value": f"`{manager.get('name', '-')}`",
+            "short": True,
+        },
+    ])
+
+    payload = {
+        "text": title,
+        "attachments": [
+            {
+                "color": _ct_color(level),
+                "fields": fields,
+                "footer": "Wazuh CloudTrail Integration",
+                "ts": int(datetime.now().timestamp()),
+            }
+        ],
+    }
+
+    send_slack(webhook, payload)
+
+
 def main():
     if len(sys.argv) < 4:
         sys.exit(1)
@@ -112,6 +329,21 @@ def main():
 
     with open(alert_file, "r") as f:
         alert = json.load(f)
+
+    # ------------------------------------------------------------------
+    # Route: CloudTrail alerts arrive directly (no AR envelope).
+    # Detect by rule group — aws_cloudtrail alerts are emitted by the
+    # aws-s3 wodle and passed directly to the integration, not wrapped
+    # in an Active Response data envelope.
+    # ------------------------------------------------------------------
+    rule_groups = alert.get("rule", {}).get("groups", [])
+    if "aws_cloudtrail" in rule_groups:
+        handle_cloudtrail_alert(alert, webhook)
+        return
+
+    # ------------------------------------------------------------------
+    # Route: Active Response alerts (existing path — unchanged)
+    # ------------------------------------------------------------------
 
     # Active Response alert structure:
     # alert.data.parameters.alert = original Wazuh detection
