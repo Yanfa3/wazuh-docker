@@ -89,7 +89,20 @@ echo "==> Checking API password synchronization..."
 # We test if the manager's internal rbac.db matches the .env.local API_PASSWORD.
 # If it returns 401 Unauthorized, we safely delete rbac.db. The manager will
 # automatically recreate it on restart using the environment variables!
-API_PW=$(grep -oP '(?<=API_PASSWORD=).*' "$WAZUH_DIR/.env.local" || true)
+# Read a single KEY from .env.local by exact name (like python dict lookup):
+#   - anchored to line start, optional 'export ' prefix
+#   - strips CR (CRLF files), surrounding quotes and whitespace
+#   - if the key is duplicated, the last definition wins (always ONE line)
+get_env() {
+  local key="$1" file="$WAZUH_DIR/.env.local"
+  [ -f "$file" ] || return 0
+  grep -E "^[[:space:]]*(export[[:space:]]+)?${key}=" "$file" \
+    | tail -n 1 \
+    | sed -E "s/^[[:space:]]*(export[[:space:]]+)?${key}=//; s/\r$//; s/^[[:space:]]+|[[:space:]]+$//g; s/^[\"'](.*)[\"']$/\1/" \
+    || true   # missing key must not abort under 'set -euo pipefail'
+}
+
+API_PW=$(get_env API_PASSWORD)
 if [ -n "$API_PW" ]; then
   # Test the API (returns 000 if container is down)
   HTTP_STATUS=$(docker compose $COMPOSE_OPTS exec -T wazuh.manager curl -sk -o /dev/null -w "%{http_code}" -X GET -u "wazuh-wui:$API_PW" https://127.0.0.1:55000/security/user/authenticate || echo "000")
@@ -112,8 +125,12 @@ if [ -f "$SINGLE_NODE_DIR/config/wazuh_cluster/wazuh_manager.conf" ]; then
   mkdir -p /opt/wazuh-secrets/wazuh-manager/
   
   # Export the webhook URLs so envsubst can use them
-  export SLACK_WEBHOOK_URL=$(grep -oP '(?<=SLACK_WEBHOOK_URL=).*' "$WAZUH_DIR/.env.local" || true)
-  export CLOUDTRAIL_SLACK_WEBHOOK_URL=$(grep -oP '(?<=CLOUDTRAIL_SLACK_WEBHOOK_URL=).*' "$WAZUH_DIR/.env.local" || echo "$SLACK_WEBHOOK_URL")
+  export SLACK_WEBHOOK_URL=$(get_env SLACK_WEBHOOK_URL)
+  export CLOUDTRAIL_SLACK_WEBHOOK_URL=$(get_env CLOUDTRAIL_SLACK_WEBHOOK_URL)
+  # Fall back to the AR webhook if the CloudTrail one is missing OR empty
+  [ -n "$CLOUDTRAIL_SLACK_WEBHOOK_URL" ] || export CLOUDTRAIL_SLACK_WEBHOOK_URL="$SLACK_WEBHOOK_URL"
+
+  [ -n "$SLACK_WEBHOOK_URL" ] || echo "    WARNING: SLACK_WEBHOOK_URL is empty in .env.local — AR Slack alerts will fail."
   
   # Replace ${SLACK_WEBHOOK_URL} and ${CLOUDTRAIL_SLACK_WEBHOOK_URL} in the Git config and save to the secrets directory
   envsubst '${SLACK_WEBHOOK_URL} ${CLOUDTRAIL_SLACK_WEBHOOK_URL}' < "$SINGLE_NODE_DIR/config/wazuh_cluster/wazuh_manager.conf" > /opt/wazuh-secrets/wazuh-manager/ossec.conf

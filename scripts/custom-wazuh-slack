@@ -325,7 +325,18 @@ def main():
         sys.exit(1)
 
     alert_file = sys.argv[1]
-    webhook = sys.argv[3]
+
+    # Defensive: hook_url must be exactly one URL. A templating bug once
+    # injected two newline-separated URLs, which made urllib reject it.
+    webhook_lines = [l.strip() for l in sys.argv[3].splitlines() if l.strip()]
+    if not webhook_lines:
+        sys.stderr.write("custom-wazuh-slack: empty hook_url\n")
+        sys.exit(1)
+    if len(webhook_lines) > 1:
+        sys.stderr.write(
+            "custom-wazuh-slack: WARNING multiline hook_url, using first line\n"
+        )
+    webhook = webhook_lines[0]
 
     with open(alert_file, "r") as f:
         alert = json.load(f)
