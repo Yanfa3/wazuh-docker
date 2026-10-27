@@ -25,3 +25,4 @@
 - [Upgrade](ref/upgrade.md)
 - [Glossary](ref/glossary.md)
 - [Known Issues](ref/known-issues.md)
+- [Native Repeat-Offender Policy](ref/native-repeat-offenders.md)
