@@ -3,6 +3,7 @@ import sys
 import json
 import urllib.request
 import urllib.error
+import urllib.parse
 import os
 import ipaddress
 from datetime import datetime
@@ -37,6 +38,8 @@ SAFE_IPS = [ip.strip() for ip in SAFE_IPS_RAW.split(",") if ip.strip()]
 # ==========================================
 
 LOG_FILE = "/var/ossec/logs/active-responses.log"
+TEMPORARY_NOTES_PREFIX = "Wazuh temporary 31151: "
+PERMANENT_NOTES = "Blocked automatically by Wazuh Active Response"
 
 def log(msg):
     with open(LOG_FILE, "a") as f:
@@ -56,7 +59,7 @@ def send_slack(payload):
         except Exception as e:
             log(f"Failed to send Slack alert: {e}")
 
-def build_slack_payload(alert_data, action, ip):
+def build_slack_payload(alert_data, action, ip, temporary=False):
     if not alert_data:
         return {
             "text": f"Wazuh Active Response | Successfully {action.lower()}ed IP `{ip}` at Cloudflare."
@@ -94,7 +97,11 @@ def build_slack_payload(alert_data, action, ip):
         action_text = action.upper()
         title = "⚠️ WAZUH SECURITY ALERT — CLOUDFLARE"
 
-    block_type = "Temporary (Cloudflare)" if action == "ADD" else "Temporary — timeout expired"
+    block_type = (
+        "Temporary — native repeat-offender timeout"
+        if temporary and action == "ADD"
+        else "Temporary — response reverted" if temporary else "Permanent"
+    )
 
     if "ssh" in description.lower():
         attack_type = "SSH / Authentication Attack"
@@ -234,93 +241,124 @@ def build_slack_payload(alert_data, action, ip):
         ],
     }
 
-def block_ip(ip, alert_data):
-    # Cloudflare IP Access Rules API (Account level)
-    # Reference: https://developers.cloudflare.com/api/operations/ip-access-rules-for-an-account-create-an-ip-access-rule
-    url = f"https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/firewall/access_rules/rules"
-    headers = {
-        "Authorization": f"Bearer {CF_API_TOKEN}",
-        "Content-Type": "application/json"
-    }
-    payload = {
-        "mode": "block",
-        "configuration": {
-            "target": "ip",
-            "value": ip
-        },
-        "notes": "Blocked automatically by Wazuh Active Response"
-    }
-    
+def api_request(method, path="", payload=None):
+    url = f"https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/firewall/access_rules/rules{path}"
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8") if payload is not None else None,
+        headers={"Authorization": f"Bearer {CF_API_TOKEN}", "Content-Type": "application/json"},
+        method=method,
+    )
     try:
-        req = urllib.request.Request(
-            url, 
-            data=json.dumps(payload).encode('utf-8'), 
-            headers=headers
-        )
-        with urllib.request.urlopen(req, timeout=10) as response:
-            data = json.loads(response.read().decode())
-            if response.status == 200 and data.get("success"):
-                log(f"Successfully blocked IP {ip} at Cloudflare.")
-                send_slack(build_slack_payload(alert_data, "ADD", ip))
-                
-    except urllib.error.HTTPError as e:
-        error_data = e.read().decode()
+        with urllib.request.urlopen(request, timeout=10) as response:
+            data = json.load(response)
+    except urllib.error.HTTPError as exc:
+        # Do not log URLs, headers, or credentials.
+        raise RuntimeError(f"Cloudflare HTTP {exc.code}") from None
+    if not data.get("success"):
+        raise RuntimeError(f"Cloudflare rejected {method}: {data.get('errors', [])}")
+    return data
+
+
+def matching_rules(ip):
+    address = ipaddress.ip_address(ip)
+    target = ip_target(str(address))
+    query = urllib.parse.urlencode({
+        "mode": "block", "configuration.target": target,
+        "configuration.value": str(address), "per_page": 50,
+    })
+    data = api_request("GET", "?" + query)
+    if data.get("result_info", {}).get("total_pages", 1) > 1:
+        raise RuntimeError("Ambiguous Cloudflare rule lookup; refusing mutation")
+    # Cloudflare may use different IPv6 spelling; compare address values.
+    matches = []
+    for rule in data.get("result", []):
+        configuration = rule.get("configuration") or {}
+        if rule.get("mode") != "block" or configuration.get("target") != target:
+            continue
         try:
-            data = json.loads(error_data)
-            if e.code == 400 and ("already exists" in str(data.get("errors")) or "duplicate_of_existing" in str(data.get("errors"))):
-                log(f"IP {ip} is already blocked at Cloudflare.")
-                return
-            err = data.get("errors", error_data)
-        except json.JSONDecodeError:
-            err = error_data
-            
-        log(f"Failed to block IP {ip} at Cloudflare. Error: {err}")
-        send_slack(f"❌ *Wazuh Active Response* | Failed to block IP `{ip}` at Cloudflare. Error: {err}")
-        
-    except Exception as e:
-        log(f"Exception while calling Cloudflare API: {e}")
-        send_slack(f"❌ *Wazuh Active Response* | Exception while calling Cloudflare API for `{ip}`: {e}")
+            returned_address = ipaddress.ip_address(configuration.get("value", ""))
+        except ValueError:
+            continue
+        if returned_address == address:
+            matches.append(rule)
+    return matches
+
+
+def ip_target(ip):
+    return "ip6" if ipaddress.ip_address(ip).version == 6 else "ip"
+
+
+def temporary_notes(alert_data):
+    # Each timeout may remove only its own response, never a newer ban.
+    alert_id = alert_data.get("id")
+    if not isinstance(alert_id, str) or not alert_id or len(alert_id) > 100:
+        raise ValueError("Temporary response requires a valid alert ID")
+    return TEMPORARY_NOTES_PREFIX + alert_id
+
+
+def block_ip(ip, alert_data, temporary=False):
+    ip = str(ipaddress.ip_address(ip))
+    notes = temporary_notes(alert_data) if temporary else PERMANENT_NOTES
+    try:
+        existing = matching_rules(ip)
+        if existing:
+            if not temporary:
+                # A permanent detection supersedes any pending temporary expiry.
+                for rule in existing:
+                    if rule.get("notes", "").startswith(TEMPORARY_NOTES_PREFIX):
+                        api_request("PATCH", "/" + rule["id"], {
+                            "mode": "block", "notes": PERMANENT_NOTES,
+                        })
+                        log(f"Promoted IP {ip} to a permanent Cloudflare block.")
+                        send_slack(build_slack_payload(alert_data, "ADD", ip))
+            log(f"IP {ip} already blocked at Cloudflare; existing rules preserved.")
+            return
+        api_request("POST", payload={
+            "mode": "block",
+            "configuration": {"target": ip_target(ip), "value": ip},
+            "notes": notes,
+        })
+        log(f"Successfully blocked IP {ip} at Cloudflare ({'temporary' if temporary else 'permanent'}).")
+        send_slack(build_slack_payload(alert_data, "ADD", ip, temporary))
+    except Exception as exc:
+        log(f"Failed to block IP {ip} at Cloudflare: {exc}")
+        send_slack(f"Cloudflare block failed for `{ip}`: {exc}")
+        raise
+
 
 def unblock_ip(ip, alert_data):
-    # Step 1: Find the Rule ID for this IP
-    search_url = f"https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/firewall/access_rules/rules?mode=block&configuration.target=ip&configuration.value={ip}"
-    headers = {
-        "Authorization": f"Bearer {CF_API_TOKEN}",
-        "Content-Type": "application/json"
-    }
-    
     try:
-        req = urllib.request.Request(search_url, headers=headers)
-        with urllib.request.urlopen(req, timeout=10) as response:
-            data = json.loads(response.read().decode())
-            results = data.get("result", [])
-            
-            if not results:
-                log(f"IP {ip} not found in Cloudflare blocklist. Nothing to unban.")
-                return
-                
-            rule_id = results[0].get("id")
-            
-    except Exception as e:
-        log(f"Failed to search Cloudflare API for IP {ip}: {e}")
-        return
-        
-    # Step 2: Delete the Rule
-    delete_url = f"https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/firewall/access_rules/rules/{rule_id}"
-    try:
-        req = urllib.request.Request(delete_url, headers=headers, method="DELETE")
-        with urllib.request.urlopen(req, timeout=10) as response:
-            data = json.loads(response.read().decode())
-            if response.status == 200 and data.get("success"):
-                log(f"Successfully unblocked IP {ip} at Cloudflare.")
-                send_slack(build_slack_payload(alert_data, "DELETE", ip))
-    except urllib.error.HTTPError as e:
-        error_data = e.read().decode()
-        log(f"Failed to delete Cloudflare rule for IP {ip}. Error: {error_data}")
-        send_slack(f"❌ *Wazuh Active Response* | Failed to unblock IP `{ip}` at Cloudflare. Error: {error_data}")
-    except Exception as e:
-        log(f"Exception while calling Cloudflare DELETE API for {ip}: {e}")
-        send_slack(f"❌ *Wazuh Active Response* | Exception while deleting Cloudflare rule for `{ip}`: {e}")
+        notes = temporary_notes(alert_data)
+        owned = [rule for rule in matching_rules(ip) if rule.get("notes") == notes]
+        if not owned:
+            log(f"No owned temporary Cloudflare block for {ip}; existing rules preserved.")
+            return
+        for rule in owned:
+            api_request("DELETE", "/" + rule["id"])
+        log(f"Successfully removed temporary Cloudflare block for IP {ip}.")
+        send_slack(build_slack_payload(alert_data, "DELETE", ip, temporary=True))
+    except Exception as exc:
+        log(f"Failed to remove temporary Cloudflare block for {ip}: {exc}")
+        send_slack(f"Cloudflare unblock failed for `{ip}`; block may remain: {exc}")
+        raise
+
+
+def check_keys(ip):
+    # STDOUT is reserved for the newline-delimited Wazuh control protocol.
+    print(json.dumps({
+        "version": 1,
+        "origin": {"name": "cloudflare-block", "module": "active-response"},
+        "command": "check_keys",
+        "parameters": {"keys": [ip]},
+    }), flush=True)
+    response = json.loads(sys.stdin.readline())
+    if response.get("command") == "abort":
+        return False
+    if response.get("command") != "continue":
+        raise ValueError("Unexpected Wazuh check_keys response")
+    return True
+
 
 def is_safe_ip(ip_str):
     if not ip_str:
@@ -336,7 +374,7 @@ def is_safe_ip(ip_str):
                 if ip_str == safe:
                     return True
     except ValueError:
-        pass
+        return True
     return False
 
 def main():
@@ -364,22 +402,35 @@ def main():
         elif "srcip" in alert_data:
             srcip = alert_data["srcip"]
             
+        temporary = "--temporary" in parameters.get("extra_args", [])
+        if command == "delete" and not temporary:
+            log("Ignoring delete for permanent Cloudflare command")
+            return
+
         # Ignore safe IPs or missing IPs
         if is_safe_ip(srcip):
             log(f"Ignoring action for safe/missing IP: {srcip}")
             return
-            
+
+        # Equivalent IPv6 spellings must share the same native response key.
+        srcip = str(ipaddress.ip_address(srcip))
+        if temporary:
+            temporary_notes(alert_data)
         if command == "add":
+            if temporary and not check_keys(srcip):
+                return
             log(f"Triggered Cloudflare block for {srcip}")
-            block_ip(srcip, alert_data)
+            block_ip(srcip, alert_data, temporary)
         elif command == "delete":
             log(f"Triggered Cloudflare unblock for {srcip}")
             unblock_ip(srcip, alert_data)
         
     except json.JSONDecodeError:
         log("Error parsing JSON input from Wazuh.")
+        return 1
     except Exception as e:
         log(f"Unexpected error: {e}")
+        return 1
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main() or 0)

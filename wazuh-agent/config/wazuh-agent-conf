@@ -175,6 +175,7 @@
   <!-- Active response -->
   <active-response>
     <disabled>no</disabled>
+    <repeated_offenders>120,1440,10080</repeated_offenders>
     <ca_store>etc/wpk_root.pem</ca_store>
     <ca_verification>yes</ca_verification>
   </active-response>
