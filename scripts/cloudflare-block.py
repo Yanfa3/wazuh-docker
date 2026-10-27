@@ -261,17 +261,28 @@ def api_request(method, path="", payload=None):
 
 
 def matching_rules(ip):
+    address = ipaddress.ip_address(ip)
+    target = ip_target(str(address))
     query = urllib.parse.urlencode({
-        "mode": "block", "configuration.target": ip_target(ip),
-        "configuration.value": ip, "per_page": 50,
+        "mode": "block", "configuration.target": target,
+        "configuration.value": str(address), "per_page": 50,
     })
     data = api_request("GET", "?" + query)
     if data.get("result_info", {}).get("total_pages", 1) > 1:
         raise RuntimeError("Ambiguous Cloudflare rule lookup; refusing mutation")
-    # Verify exact matches locally as well as applying API filters.
-    return [rule for rule in data.get("result", [])
-            if rule.get("mode") == "block"
-            and rule.get("configuration") == {"target": ip_target(ip), "value": ip}]
+    # Cloudflare may use different IPv6 spelling; compare address values.
+    matches = []
+    for rule in data.get("result", []):
+        configuration = rule.get("configuration") or {}
+        if rule.get("mode") != "block" or configuration.get("target") != target:
+            continue
+        try:
+            returned_address = ipaddress.ip_address(configuration.get("value", ""))
+        except ValueError:
+            continue
+        if returned_address == address:
+            matches.append(rule)
+    return matches
 
 
 def ip_target(ip):
@@ -287,6 +298,7 @@ def temporary_notes(alert_data):
 
 
 def block_ip(ip, alert_data, temporary=False):
+    ip = str(ipaddress.ip_address(ip))
     notes = temporary_notes(alert_data) if temporary else PERMANENT_NOTES
     try:
         existing = matching_rules(ip)
@@ -399,7 +411,9 @@ def main():
         if is_safe_ip(srcip):
             log(f"Ignoring action for safe/missing IP: {srcip}")
             return
-            
+
+        # Equivalent IPv6 spellings must share the same native response key.
+        srcip = str(ipaddress.ip_address(srcip))
         if temporary:
             temporary_notes(alert_data)
         if command == "add":

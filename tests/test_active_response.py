@@ -159,6 +159,51 @@ class CloudflareTests(unittest.TestCase):
             cf.block_ip("2001:db8::1", ALERT, temporary=True)
         self.assertEqual(api.call_args.kwargs["payload"]["configuration"]["target"], "ip6")
 
+    def test_ipv6_lookup_matches_address_values_and_normalizes_query(self):
+        expanded = "2001:0DB8:0:0:0:0:0:1"
+        canonical = "2001:db8::1"
+        for source, returned in ((expanded, canonical), (canonical, expanded)):
+            with self.subTest(source=source, returned=returned):
+                owned = {**rule(cf.temporary_notes(ALERT)),
+                         "configuration": {"target": "ip6", "value": returned}}
+                others = [
+                    {**owned, "configuration": {"target": "ip6", "value": "2001:db8::2"}},
+                    {**owned, "configuration": {"target": "ip6", "value": "invalid"}},
+                    {**owned, "configuration": {"target": "ip", "value": returned}},
+                    {**owned, "mode": "whitelist"},
+                ]
+                with patch.object(cf, "api_request", return_value={"result": others + [owned]}) as api:
+                    self.assertEqual(cf.matching_rules(source), [owned])
+                query = cf.urllib.parse.parse_qs(api.call_args.args[1][1:])
+                self.assertEqual(query["configuration.value"], [canonical])
+
+    def test_ipv6_create_and_response_key_are_canonical(self):
+        expanded = "2001:0DB8:0:0:0:0:0:1"
+        canonical = "2001:db8::1"
+        alert = {**ALERT, "data": {"srcip": expanded}}
+        with patch.object(cf, "api_request", side_effect=[{"result": []}, {"success": True}]) as api:
+            cf.block_ip(expanded, alert, temporary=True)
+        self.assertEqual(api.call_args.kwargs["payload"]["configuration"]["value"], canonical)
+        with patch.object(cf, "block_ip") as block:
+            _, output = self.invoke(alert=alert)
+        self.assertEqual(json.loads(output)["parameters"]["keys"], [canonical])
+        block.assert_called_once_with(canonical, alert, True)
+
+    def test_ipv6_expiry_and_promotion_accept_different_api_spelling(self):
+        expanded = "2001:0DB8:0:0:0:0:0:1"
+        canonical = "2001:db8::1"
+        for source, returned in ((expanded, canonical), (canonical, expanded)):
+            with self.subTest(source=source, returned=returned):
+                owned = {**rule(cf.temporary_notes(ALERT)),
+                         "configuration": {"target": "ip6", "value": returned}}
+                with patch.object(cf, "api_request", side_effect=[{"result": [owned]}, {"success": True}]) as api:
+                    cf.unblock_ip(source, ALERT)
+                self.assertEqual(api.call_args.args, ("DELETE", "/owned"))
+                with patch.object(cf, "api_request", side_effect=[{"result": [owned]}, {"success": True}]) as api:
+                    cf.block_ip(source, ALERT)
+                self.assertEqual(api.call_args.args, ("PATCH", "/owned", {
+                    "mode": "block", "notes": cf.PERMANENT_NOTES}))
+
     def test_api_rejection_is_failure_and_does_not_expose_http_body(self):
         with patch.object(cf.urllib.request, "urlopen", return_value=io.StringIO('{"success": false, "errors": []}')):
             with self.assertRaises(RuntimeError):
